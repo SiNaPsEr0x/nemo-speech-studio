@@ -1,0 +1,20 @@
+# Dati locali e componenti scaricati
+Runtime/
+Models/
+Temp/
+Downloads/
+Logs/
+Output/
+
+# File di editor e sistema
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+*.gguf
+*.ipa
+*.zip
+*.mp4
+*.mkv
+*.wav
