@@ -6,3 +6,4 @@
 - Il launcher scarica l'installer ufficiale NVIDIA ed esegue NeMo-Speech.cpp. Il modello GGUF di traduzione ha un hash SHA-256 configurato nello script; aggiorna URL e hash insieme solo dopo verifica.
 - Dopo modifiche controlla sintassi PowerShell 7, JavaScript incorporato e comandi FFmpeg. Prova avvio, Stop e `Ctrl+C` su Windows/CUDA quando disponibile; segnala esplicitamente le prove non eseguite.
 - Nel README mantieni la distinzione fra il launcher indipendente e i componenti NVIDIA, con i relativi link e condizioni di distribuzione. Non inserire modelli, binari o contenuti di `Output`.
+- Mantieni `assets/nemo-studio-hero.png` referenziato dal README con un percorso relativo. Il progetto è distribuito con Apache 2.0: conserva `LICENSE` e `NOTICE` e la citazione a SiNaPsEr0x quando aggiorni o redistribuisci contenuti originali.
