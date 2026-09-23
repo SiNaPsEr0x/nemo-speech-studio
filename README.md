@@ -1,6 +1,12 @@
 # NeMo Studio
 
+![NeMo Studio: dalle onde sonore alle voci, ai sottotitoli e al doppiaggio](assets/nemo-studio-hero.png)
+
 Interfaccia locale per trascrivere audio e video, riconoscere le voci, creare sottotitoli e generare un doppiaggio con [NeMo-Speech.cpp](https://github.com/NVIDIA/NeMo-Speech.cpp).
+
+## Perché nasce
+
+NeMo Studio nasce per colmare un vuoto pratico: ottenere **trascrizione, riconoscimento dei parlanti, sottotitoli, traduzione e doppiaggio in un unico strumento locale**, senza dover passare per software a pagamento o abbonamenti. L'idea è rendere accessibile un flusso completo, dalla registrazione al video pronto, usando componenti aperti e lasciando i propri file sul PC.
 
 ## Cosa fa
 
@@ -33,6 +39,14 @@ Il launcher mostra l'indirizzo della UI locale. I risultati completati vengono s
 Questa repository contiene soltanto il launcher. Il runtime, i modelli, i download, i file temporanei, i log e i risultati restano sul PC: **non caricarli nella repository**. La traduzione opzionale scarica un GGUF di Riva Translate da Hugging Face e ne controlla l'hash SHA-256.
 
 NeMo Studio è un progetto indipendente, non un prodotto ufficiale NVIDIA. NeMo-Speech.cpp e i modelli sono distribuiti dai rispettivi titolari secondo le loro condizioni. Nessun binario o peso di modello è incluso qui.
+
+## Licenza e attribuzione
+
+Il contenuto originale di questa repository è distribuito con [Apache License 2.0](LICENSE). Puoi usarlo, modificarlo e ridistribuirlo, anche in un progetto commerciale. **Se lo ridistribuisci o pubblichi una versione derivata**, conserva la licenza, gli avvisi di copyright e l'attribuzione contenuta in [NOTICE](NOTICE): **NeMo Studio di SiNaPsEr0x**, con link a questa repository. Segnala le modifiche ai file che hai cambiato.
+
+Per il solo uso privato non è richiesta una menzione pubblica. Se racconti o mostri un progetto che usa NeMo Studio, una citazione a **SiNaPsEr0x** e un link alla repository sono apprezzati.
+
+La licenza di questa repository non sostituisce le licenze dei componenti e dei modelli scaricati separatamente.
 
 ## Stato delle verifiche
 
