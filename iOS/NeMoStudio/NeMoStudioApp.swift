@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import CoreTransferable
 import PhotosUI
+import Photos
 import SwiftUI
 import UniformTypeIdentifiers
 import AudioCommon
@@ -164,6 +165,14 @@ private enum StudioStyle {
 
 private enum StudioTab: Hashable { case home, studio, results, voice }
 
+private enum PhotoExportError: LocalizedError {
+    case accessDenied
+
+    var errorDescription: String? {
+        "Consenti a NeMo Studio di aggiungere video in Impostazioni → Foto."
+    }
+}
+
 // Photos gives the app a temporary file; preserve it inside the transfer
 // callback so long videos never have to pass through an in-memory Data value.
 private struct ImportedMovie: Transferable {
@@ -242,6 +251,8 @@ struct StudioView: View {
     @State private var activeStages: [String] = []
     @State private var jobStartedAt = Date()
     @State private var estimatedFinish: Date?
+    @State private var progressExpanded = false
+    @State private var savingVideo: URL?
     @State private var lines: [StudioLine] = []
     @State private var translated: [StudioLine] = []
     @State private var files: [URL] = []
@@ -258,6 +269,20 @@ struct StudioView: View {
             Tab("Voce", systemImage: "mic.fill", value: .voice) { voiceScreen }
         }
         .tint(StudioStyle.accent)
+        .overlay(alignment: .topTrailing) {
+            if working && !activeStages.isEmpty {
+                processingBubble
+                    .padding(.trailing, 16)
+                    .padding(.top, 8)
+                    .zIndex(10)
+                    .transition(.scale(scale: 0.65, anchor: .topTrailing).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.4, dampingFraction: 0.78), value: progressExpanded)
+        .animation(.spring(response: 0.4, dampingFraction: 0.78), value: working)
+        .onChange(of: working) { _, isWorking in
+            if !isWorking { progressExpanded = false }
+        }
         .fileImporter(isPresented: $importerOpen, allowedContentTypes: [.item]) { result in
             switch result {
             case .success(let url): importMedia(url)
@@ -333,22 +358,64 @@ struct StudioView: View {
                 workflowCard
             }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if working && !activeStages.isEmpty { processingBar }
+    }
+
+    private var processingBubble: some View {
+        Group {
+            if progressExpanded {
+                VStack(alignment: .leading, spacing: 0) {
+                    Button {
+                        progressExpanded = false
+                    } label: {
+                        HStack {
+                            Label("Elaborazione in corso", systemImage: "waveform")
+                                .font(.subheadline.bold())
+                            Spacer()
+                            Image(systemName: "chevron.up")
+                        }
+                        .foregroundStyle(.white)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Chiudi dettagli elaborazione")
+                    .padding(.bottom, 10)
+                    processingDetails
+                }
+                .padding(16)
+                .frame(width: 310, alignment: .leading)
+                .background(StudioStyle.surface, in: RoundedRectangle(cornerRadius: 22))
+                .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(StudioStyle.accent.opacity(0.55)))
+                .shadow(color: .black.opacity(0.4), radius: 18, y: 8)
+                .transition(.scale(scale: 0.55, anchor: .topTrailing).combined(with: .opacity))
+            } else {
+                Button {
+                    progressExpanded = true
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: "waveform")
+                            .font(.title3.bold())
+                            .symbolEffect(.pulse, options: .repeating)
+                        Text("IN CORSO").font(.system(size: 8, weight: .heavy, design: .rounded))
+                    }
+                    .foregroundStyle(StudioStyle.background)
+                    .frame(width: 74, height: 74)
+                    .background(StudioStyle.accent, in: Circle())
+                    .overlay(Circle().strokeBorder(.white.opacity(0.7), lineWidth: 2))
+                    .shadow(color: StudioStyle.accent.opacity(0.45), radius: 12)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Apri dettagli elaborazione: \(status)")
+                .transition(.scale(scale: 0.55, anchor: .topTrailing).combined(with: .opacity))
+            }
         }
     }
 
-    private var processingBar: some View {
+    private var processingDetails: some View {
         let current = stageIndex(for: status)
         return VStack(alignment: .leading, spacing: 9) {
-            HStack {
-                Label("Elaborazione sul dispositivo", systemImage: "waveform")
-                    .font(.subheadline.bold())
-                Spacer()
-                Text("Fase \(current + 1) di \(activeStages.count)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(StudioStyle.muted)
-            }
+            Text("Fase \(current + 1) di \(activeStages.count)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(StudioStyle.muted)
             Text(status)
                 .font(.subheadline)
                 .foregroundStyle(StudioStyle.accent)
@@ -763,17 +830,55 @@ struct StudioView: View {
     }
 
     private func fileRow(_ file: URL) -> some View {
-        ShareLink(item: file) {
-            HStack {
-                Image(systemName: isVideo(file) ? "film.fill" : "doc.fill")
-                Text(file.lastPathComponent).lineLimit(2)
-                Spacer()
-                Image(systemName: "square.and.arrow.up")
+        VStack(alignment: .leading, spacing: 10) {
+            Label(file.lastPathComponent, systemImage: isVideo(file) ? "film.fill" : "doc.fill")
+                .font(.subheadline)
+                .foregroundStyle(.white)
+                .lineLimit(2)
+            HStack(spacing: 12) {
+                ShareLink(item: file) {
+                    Label("Condividi", systemImage: "square.and.arrow.up")
+                }
+                if ["mp4", "mov"].contains(file.pathExtension.lowercased()) {
+                    Button {
+                        saveToPhotos(file)
+                    } label: {
+                        Label(savingVideo == file ? "Salvo…" : "Salva in Foto",
+                              systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(savingVideo != nil)
+                }
             }
             .font(.subheadline)
             .foregroundStyle(StudioStyle.accent)
-            .padding(12)
-            .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 12))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func saveToPhotos(_ file: URL) {
+        savingVideo = file
+        Task {
+            do {
+                let authorization = await withCheckedContinuation { continuation in
+                    PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                        continuation.resume(returning: status)
+                    }
+                }
+                guard authorization == .authorized || authorization == .limited else {
+                    throw PhotoExportError.accessDenied
+                }
+                try await PHPhotoLibrary.shared().performChanges {
+                    _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: file)
+                }
+                info = "Video salvato nel rullino Foto."
+                SessionLog.shared.write("Photos save succeeded type=\(file.pathExtension.lowercased())", always: true)
+            } catch {
+                info = "Salvataggio in Foto non riuscito: \(error.localizedDescription)"
+                SessionLog.shared.write("Photos save failed: \(String(reflecting: error))", always: true)
+            }
+            savingVideo = nil
         }
     }
 
