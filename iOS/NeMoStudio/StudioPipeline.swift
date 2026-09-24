@@ -51,69 +51,18 @@ enum StudioPipeline {
         strictExports: Bool,
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> StudioResult {
-        SessionLog.shared.write("Pipeline input type=\(source.pathExtension.lowercased()) diarization=\(diarization) subtitles=\(subtitles) soft=\(softSubtitles) dubbing=\(dubbing) burnIn=\(burnIn)")
+        SessionLog.shared.write("Pipeline input type=\(source.pathExtension.lowercased()) bytes=\((try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1) diarization=\(diarization) subtitles=\(subtitles) soft=\(softSubtitles) dubbing=\(dubbing) burnIn=\(burnIn) thermal=\(ProcessInfo.processInfo.thermalState.rawValue)", always: true)
         progress("Preparo la traccia audio")
         let audio = try await prepareAudio(source)
         SessionLog.shared.write("Audio prepared type=\(audio.pathExtension.lowercased())")
         try Task.checkCancellation()
 
         progress("Carico Nemotron 3.5 INT8")
-        let asrStarted = Date()
-        let asrPath = try HuggingFaceDownloader.getCacheDirectory(for: NemotronStreamingASRModel.defaultModelId)
-        let model = try await NemotronStreamingASRModel.fromLocal(bundleDir: asrPath)
-        SessionLog.shared.write("Nemotron loaded in \(Int(Date().timeIntervalSince(asrStarted)))s")
-        try Task.checkCancellation()
-        let session = try model.createSession(language: language == "auto" ? nil : language)
-
-        progress("Trascrivo sul dispositivo")
-        let stream = AudioFileLoader.stream(
-            url: audio,
-            options: AudioFileStreamOptions(targetSampleRate: 16_000, chunkDuration: 2))
-        var timedWords: [TimedWord] = []
-        var audioChunks = 0
-        for try await chunk in stream {
-            try Task.checkCancellation()
-            audioChunks += 1
-            for update in try session.pushAudio(chunk.samples) where !update.words.isEmpty {
-                timedWords = update.words
-            }
-            if audioChunks % 15 == 0 {
-                SessionLog.shared.write("ASR streaming chunks=\(audioChunks) latestWords=\(timedWords.count)")
-            }
-        }
-        for update in try session.finalize() where !update.words.isEmpty {
-            timedWords = update.words
-        }
-        guard !timedWords.isEmpty else { throw StudioPipelineError.noWords }
-        SessionLog.shared.write("ASR final chunks=\(audioChunks) words=\(timedWords.count)", always: true)
-        // Release the ASR graph before loading the second model on the phone.
-        model.unload()
-
-        var speakers: [DiarizedSegment] = []
-        if diarization {
-            try Task.checkCancellation()
-            progress("Carico Sortformer (4 speaker)")
-            let sortPath = try HuggingFaceDownloader.getCacheDirectory(for: SortformerDiarizer.defaultModelId)
-            let diarizer = try await SortformerDiarizer.fromPretrained(
-                cacheDir: sortPath, offlineMode: true)
-            SessionLog.shared.write("Sortformer loaded from local cache")
-            try Task.checkCancellation()
-            progress("Riconosco i parlanti")
-            let speakerSession = diarizer.makeStreamingSession()
-            // Avoid holding the complete audio of a long video in RAM.
-            let audioStream = AudioFileLoader.stream(
-                url: audio,
-                options: AudioFileStreamOptions(targetSampleRate: 16_000, chunkDuration: 30))
-            var diarChunks = 0
-            for try await chunk in audioStream {
-                try Task.checkCancellation()
-                _ = try speakerSession.push(audio: chunk.samples)
-                diarChunks += 1
-                if diarChunks % 10 == 0 { SessionLog.shared.write("Sortformer chunks=\(diarChunks)") }
-            }
-            speakers = try speakerSession.finish().segments
-            SessionLog.shared.write("Sortformer final chunks=\(diarChunks) segments=\(speakers.count)", always: true)
-        }
+        let timedWords = try await transcribe(audio: audio, language: language, progress: progress)
+        // The Nemotron session and its graph have left scope before Sortformer loads.
+        let speakers = diarization
+            ? try await recognizeSpeakers(audio: audio, progress: progress)
+            : []
 
         let lines = makeLines(words: timedWords, speakers: speakers)
         SessionLog.shared.write("Aligned transcript lines=\(lines.count)")
@@ -228,6 +177,75 @@ enum StudioPipeline {
         SessionLog.shared.write("Pipeline done lines=\(lines.count) files=\(files.count) warnings=\(warnings.count)", always: true)
         return StudioResult(lines: lines, translated: translated, files: files,
                             warnings: warnings)
+    }
+
+    private static func transcribe(audio: URL, language: String,
+                                   progress: @escaping @Sendable (String) -> Void) async throws -> [TimedWord] {
+        let started = Date()
+        let asrPath = try HuggingFaceDownloader.getCacheDirectory(for: NemotronStreamingASRModel.defaultModelId)
+        SessionLog.shared.write("Nemotron loading cache=\(asrPath.lastPathComponent)", always: true)
+        let model = try await NemotronStreamingASRModel.fromLocal(bundleDir: asrPath)
+        defer {
+            model.unload()
+            SessionLog.shared.write("Nemotron graph unloaded; ASR scope exiting", always: true)
+        }
+        SessionLog.shared.write("Nemotron loaded in \(Int(Date().timeIntervalSince(started)))s", always: true)
+        try Task.checkCancellation()
+        let session = try model.createSession(language: language == "auto" ? nil : language)
+        progress("Trascrivo sul dispositivo")
+        let stream = AudioFileLoader.stream(
+            url: audio,
+            options: AudioFileStreamOptions(targetSampleRate: 16_000, chunkDuration: 2))
+        var timedWords: [TimedWord] = []
+        var audioChunks = 0
+        for try await chunk in stream {
+            try Task.checkCancellation()
+            audioChunks += 1
+            for update in try session.pushAudio(chunk.samples) where !update.words.isEmpty {
+                timedWords = update.words
+            }
+            if audioChunks == 1 || audioChunks % 10 == 0 {
+                SessionLog.shared.write("ASR chunks=\(audioChunks) words=\(timedWords.count) elapsed=\(Int(Date().timeIntervalSince(started)))s", always: true)
+                progress("Trascrivo sul dispositivo: \(audioChunks) blocchi audio")
+            }
+        }
+        for update in try session.finalize() where !update.words.isEmpty {
+            timedWords = update.words
+        }
+        guard !timedWords.isEmpty else { throw StudioPipelineError.noWords }
+        SessionLog.shared.write("ASR final chunks=\(audioChunks) words=\(timedWords.count) elapsed=\(Int(Date().timeIntervalSince(started)))s", always: true)
+        return timedWords
+    }
+
+    private static func recognizeSpeakers(audio: URL,
+                                          progress: @escaping @Sendable (String) -> Void) async throws -> [DiarizedSegment] {
+        try Task.checkCancellation()
+        let started = Date()
+        progress("Carico Sortformer (4 speaker)")
+        let sortPath = try HuggingFaceDownloader.getCacheDirectory(for: SortformerDiarizer.defaultModelId)
+        SessionLog.shared.write("Sortformer load begin cache=\(sortPath.lastPathComponent) thermal=\(ProcessInfo.processInfo.thermalState.rawValue)", always: true)
+        let diarizer = try await SortformerDiarizer.fromPretrained(
+            cacheDir: sortPath, offlineMode: true)
+        SessionLog.shared.write("Sortformer loaded in \(Int(Date().timeIntervalSince(started)))s", always: true)
+        try Task.checkCancellation()
+        progress("Riconosco i parlanti")
+        let speakerSession = diarizer.makeStreamingSession()
+        let audioStream = AudioFileLoader.stream(
+            url: audio,
+            options: AudioFileStreamOptions(targetSampleRate: 16_000, chunkDuration: 30))
+        var diarChunks = 0
+        for try await chunk in audioStream {
+            try Task.checkCancellation()
+            _ = try speakerSession.push(audio: chunk.samples)
+            diarChunks += 1
+            if diarChunks == 1 || diarChunks % 5 == 0 {
+                SessionLog.shared.write("Sortformer chunks=\(diarChunks) elapsed=\(Int(Date().timeIntervalSince(started)))s", always: true)
+                progress("Riconosco i parlanti: \(diarChunks) blocchi audio")
+            }
+        }
+        let segments = try speakerSession.finish().segments
+        SessionLog.shared.write("Sortformer final chunks=\(diarChunks) segments=\(segments.count) elapsed=\(Int(Date().timeIntervalSince(started)))s", always: true)
+        return segments
     }
 
     static func synthesize(_ text: String, voice: String, language: String) async throws -> URL {
