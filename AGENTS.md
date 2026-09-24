@@ -9,4 +9,4 @@
 - Mantieni `assets/nemo-studio-hero.png` referenziato dal README con un percorso relativo. Il progetto è distribuito con Apache 2.0: conserva `LICENSE` e `NOTICE` e la citazione a SiNaPsEr0x quando aggiorni o redistribuisci contenuti originali.
 
 - La sola Action iOS (`.github/workflows/ios-port-check.yml`) usa esclusivamente `workflow_dispatch`: nessun `push`, `pull_request` o altro trigger automatico. Completa e controlla prima tutte le modifiche; poi avvia manualmente la build da GitHub Actions quando appropriato. La build riuscita aggiorna l'unica Release `ios-current` con un solo asset IPA unsigned.
-- Per iOS esamina anche `iOS/README.md` e il codice Swift interessato, risolvi i warning alla fonte, conserva import da File e Foto. Verifica con test reali le funzioni prima di descriverle come funzionanti su dispositivo.
+- Per iOS esamina anche `iOS/README.md` e il codice Swift interessato, risolvi i warning alla fonte, conserva import da File e Foto. Verifica con campioni reali H.264 e H.265/HEVC, audio AAC e tracce sottotitoli selezionabili nell'MKV; prova le funzioni su iPhone prima di descriverle come funzionanti su dispositivo.
