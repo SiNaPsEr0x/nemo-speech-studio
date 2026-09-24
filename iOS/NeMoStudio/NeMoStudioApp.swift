@@ -1,6 +1,17 @@
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
+import AudioCommon
+import UIKit
+
+final class StudioAppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication,
+                     handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        HuggingFaceDownloader.handleBackgroundSessionEvents(
+            identifier: identifier, completionHandler: completionHandler)
+    }
+}
 
 // A single, per-process session log: truncate before anything else writes to it.
 final class SessionLog {
@@ -63,12 +74,17 @@ enum AppStoragePaths {
 
 @main
 struct NeMoStudioApp: App {
+    @UIApplicationDelegateAdaptor(StudioAppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
         UserDefaults.standard.register(defaults: ["debugEnabled": false])
         _ = SessionLog.shared
         AppStoragePaths.prepare()
+        // Models are never placed in the purgeable iOS Library/Caches directory.
+        setenv("QWEN3_CACHE_DIR", AppStoragePaths.models.path, 1)
+        HuggingFaceDownloader.backgroundTransfer = BackgroundTransferConfiguration(
+            sessionIdentifier: "io.github.sinapser0x.nemostudio.models")
     }
 
     var body: some Scene {
@@ -102,14 +118,26 @@ private enum StudioMode: String, CaseIterable, Identifiable {
     case dubbing = "Doppiaggio"
     case complete = "Tutto"
     var id: String { rawValue }
+    var available: Bool { self == .transcription || self == .subtitles }
 }
 
 struct StudioView: View {
+    @StateObject private var library = ModelLibrary()
     @State private var importerOpen = false
     @State private var selectedFile: URL?
     @State private var mode: StudioMode = .transcription
     @State private var info: String?
     @State private var debugEnabled = UserDefaults.standard.bool(forKey: "debugEnabled")
+    @State private var language = "it-IT"
+    @State private var diarization = true
+    @State private var working = false
+    @State private var status = ""
+    @State private var lines: [StudioLine] = []
+    @State private var files: [URL] = []
+    @State private var job: Task<Void, Never>?
+    @State private var voiceText = ""
+    @State private var voice = "John"
+    @State private var voiceFile: URL?
 
     var body: some View {
         ZStack {
@@ -118,9 +146,11 @@ struct StudioView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     header
                     hero
+                    modelCard
                     importCard
                     workflowCard
                     engineCard
+                    voiceCard
                     diagnostics
                     Text("NeMo Studio · progetto indipendente · SiNaPsEr0x")
                         .font(.caption2).foregroundStyle(StudioStyle.muted)
@@ -200,6 +230,26 @@ struct StudioView: View {
         }.card()
     }
 
+    private var modelCard: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            Label("Modelli sul telefono", systemImage: "arrow.down.circle.fill").font(.headline)
+            Text(library.status).font(.caption).foregroundStyle(StudioStyle.muted)
+            if library.downloading { ProgressView(value: library.fraction).tint(StudioStyle.accent) }
+            HStack {
+                Button(library.downloading ? "Download in corso" : "Scarica / riprendi modelli") {
+                    library.downloadAll()
+                }
+                .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+                .disabled(library.downloading)
+                if library.downloading {
+                    Button("Stop") { library.stop() }.buttonStyle(.bordered)
+                }
+            }
+            Text("Nemotron 3.5 · Sortformer · Magpie/NanoCodec · Riva 4B. I file restano nella cartella privata Models; un download interrotto riparte da quelli già verificati.")
+                .font(.caption2).foregroundStyle(StudioStyle.muted)
+        }.card()
+    }
+
     private var workflowCard: some View {
         VStack(alignment: .leading, spacing: 17) {
             Label("Flusso di lavoro", systemImage: "slider.horizontal.3").font(.headline)
@@ -208,29 +258,130 @@ struct StudioView: View {
             }
             .tint(StudioStyle.accent)
             .onChange(of: mode) { value in SessionLog.shared.write("Preset selezionato: \(value.rawValue)") }
+            Picker("Lingua originale", selection: $language) {
+                Text("Italiano").tag("it-IT")
+                Text("Automatico").tag("auto")
+                Text("Inglese").tag("en")
+                Text("Francese").tag("fr")
+                Text("Tedesco").tag("de")
+                Text("Spagnolo").tag("es")
+            }
+            .tint(StudioStyle.accent)
+            Toggle("Riconosci i parlanti con Sortformer", isOn: $diarization)
+                .tint(StudioStyle.accent).font(.subheadline)
             HStack(spacing: 9) {
                 feature("Trascrivi", "text.quote")
                 feature("Parlanti", "person.2.wave.2")
                 feature("Traduci", "character.book.closed")
             }
-            Text("Le elaborazioni saranno disponibili quando il runtime NeMo sarà portato e validato su iOS.")
+            Text(mode.available ? "Nemotron 3.5 e Sortformer elaborano sul dispositivo. I modelli vanno scaricati una sola volta." : "Questo preset richiede ancora traduzione Riva e/o produzione video iOS: non produce risultati simulati.")
                 .font(.caption).foregroundStyle(StudioStyle.muted)
-            Button("Avvia elaborazione") {}
+            Button(working ? "Elaborazione in corso" : "Avvia elaborazione") { start() }
                 .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
-                .disabled(true)
+                .disabled(working || !library.ready || selectedFile == nil || !mode.available)
                 .frame(maxWidth: .infinity)
+            if working { Button("Stop elaborazione") { job?.cancel() }.foregroundStyle(.orange) }
+            if !status.isEmpty { Text(status).font(.caption).foregroundStyle(StudioStyle.accent) }
         }.card()
     }
 
     private var engineCard: some View {
         HStack(alignment: .top, spacing: 13) {
-            Image(systemName: "cpu").foregroundStyle(.orange)
+            Image(systemName: "cpu").foregroundStyle(StudioStyle.accent)
             VStack(alignment: .leading, spacing: 6) {
-                Text("Motore NeMo non disponibile su iOS").font(.subheadline.bold())
-                Text("Questa versione contiene l’interfaccia e la diagnostica, non i modelli o il motore di inferenza. Nessun risultato viene simulato.")
+                Text("Nemotron 3.5 + Sortformer + Magpie").font(.subheadline.bold())
+                Text("Modelli NVIDIA convertiti per Core ML / MLX: stessi modelli di origine, runtime diverso. La traduzione Riva e il mux video non sono ancora disponibili.")
                     .font(.caption).foregroundStyle(StudioStyle.muted)
             }
+            if !lines.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Trascrizione").font(.headline)
+                    ForEach(lines) { line in
+                        Text("\(line.speaker > 0 ? "Speaker \(line.speaker) · " : "")\(line.text)")
+                            .font(.caption).foregroundStyle(.white.opacity(0.9))
+                    }
+                    ForEach(files, id: \.self) { file in
+                        ShareLink(item: file) { Label(file.lastPathComponent, systemImage: "square.and.arrow.up") }
+                            .font(.caption).foregroundStyle(StudioStyle.accent)
+                    }
+                }
+            }
         }.card()
+    }
+
+    private var voiceCard: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Label("Voce Magpie", systemImage: "waveform.badge.mic").font(.headline)
+            TextField("Testo da pronunciare", text: $voiceText, axis: .vertical)
+                .lineLimit(2...5).padding(10).background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 11))
+            Picker("Voce", selection: $voice) {
+                ForEach(["John", "Sofia", "Jason", "Aria", "Leo"], id: \.self) { Text($0).tag($0) }
+            }
+            Button("Genera WAV in italiano") { synthesize() }
+                .disabled(!library.ready || voiceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || working)
+                .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+            if let voiceFile {
+                ShareLink(item: voiceFile) { Label("Condividi WAV", systemImage: "square.and.arrow.up") }
+                    .foregroundStyle(StudioStyle.accent)
+            }
+        }.card()
+    }
+
+    private func start() {
+        guard let selectedFile else { return }
+        working = true
+        files = []
+        lines = []
+        status = "Avvio modello locale..."
+        let selectedLanguage = language
+        let useDiarization = diarization
+        let makeSubtitles = mode == .subtitles
+        job = Task {
+            do {
+                let worker = Task.detached(priority: .userInitiated) {
+                    try await StudioPipeline.process(source: selectedFile, language: selectedLanguage,
+                                                     diarization: useDiarization, subtitles: makeSubtitles) { phase in
+                        Task { @MainActor in self.status = phase }
+                    }
+                }
+                let result = try await withTaskCancellationHandler(operation: {
+                    try await worker.value
+                }, onCancel: { worker.cancel() })
+                lines = result.lines
+                files = result.files
+                status = "Completato: \(result.files.count) file pronti"
+            } catch is CancellationError {
+                status = "Interrotto"
+            } catch {
+                status = "Errore: \(error.localizedDescription)"
+                SessionLog.shared.write("Elaborazione fallita: \(error.localizedDescription)", always: true)
+            }
+            working = false
+            job = nil
+        }
+    }
+
+    private func synthesize() {
+        working = true
+        status = "MagpieTTS genera la voce..."
+        let text = voiceText
+        let selectedVoice = voice
+        job = Task {
+            do {
+                let worker = Task.detached(priority: .userInitiated) {
+                    try await StudioPipeline.synthesize(text, voice: selectedVoice, language: "it")
+                }
+                voiceFile = try await withTaskCancellationHandler(operation: {
+                    try await worker.value
+                }, onCancel: { worker.cancel() })
+                status = "WAV pronto"
+            } catch {
+                status = "Errore voce: \(error.localizedDescription)"
+                SessionLog.shared.write("Magpie fallito: \(error.localizedDescription)", always: true)
+            }
+            working = false
+            job = nil
+        }
     }
 
     private var diagnostics: some View {
