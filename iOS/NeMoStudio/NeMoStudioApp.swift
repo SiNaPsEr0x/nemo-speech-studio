@@ -117,7 +117,7 @@ struct NeMoStudioApp: App {
         WindowGroup {
             StudioView()
                 .preferredColorScheme(.dark)
-                .onChange(of: scenePhase) { phase in
+                .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
                         SessionLog.shared.refresh()
                         UserDefaults.standard.set(true, forKey: "lastSessionUnfinished")
@@ -379,7 +379,7 @@ struct StudioView: View {
                 ForEach(StudioMode.allCases) { option in Text(option.rawValue).tag(option) }
             }
             .tint(StudioStyle.accent)
-            .onChange(of: mode) { value in SessionLog.shared.write("Preset selezionato: \(value.rawValue)") }
+            .onChange(of: mode) { _, value in SessionLog.shared.write("Preset selezionato: \(value.rawValue)") }
             Picker("Lingua originale", selection: $language) {
                 Text("Italiano").tag("it-IT")
                 Text("Automatico").tag("auto")

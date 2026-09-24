@@ -71,7 +71,10 @@ enum MediaComposer {
         let seconds = CMTimeGetSeconds(duration)
         guard seconds > 0, seconds.isFinite else { throw MediaComposerError.unsupported }
         SessionLog.shared.write("Burn-in MP4 duration=\(seconds)s captions=\(lines.count)")
-        let composition = AVMutableVideoComposition(propertiesOf: asset)
+        let sourceComposition = try await AVVideoComposition.videoComposition(withPropertiesOf: asset)
+        guard let composition = sourceComposition.mutableCopy() as? AVMutableVideoComposition else {
+            throw MediaComposerError.unsupported
+        }
         let size = composition.renderSize
         let parent = CALayer()
         let picture = CALayer()
