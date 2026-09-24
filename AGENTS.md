@@ -16,3 +16,5 @@
 - Nel tab Studio etichetta e spiega lingua originale e lingua del risultato. La barra di elaborazione mostra una stima del tempo residuo basata sulle misure effettive, segnala quando non è disponibile e non presenta fasi come tempi esatti. Mantieni diagnostica durevole tra sessioni e rilascia le risorse tra modelli.
 
 - Durante i job video mostra una bolla animata in alto a destra su ogni tab: tocco per espandere i dettagli con fase, tempo stimato e stop, tocco della testata per richiudere. I risultati MP4/MOV possono essere salvati esplicitamente in Foto con permesso di sola aggiunta; i formati non supportati da Foto restano condivisibili.
+
+- La home iOS offre selezione Q4/Q5/Q6/Q8 dello stesso Riva 4B, proposta prudente per RAM, controllo dello spazio e download/rimozione per modello. Non presentare le soglie come benchmark o garanzia di funzionamento su ogni iPhone; Q8 è manuale. Conserva la verifica SHA-256 di ogni variante e non cancellare risultati o cache di modelli diversi.
