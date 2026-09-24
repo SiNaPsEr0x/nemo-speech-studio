@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import Foundation
 import CoreTransferable
 import PhotosUI
@@ -233,6 +234,7 @@ private enum StudioMode: String, CaseIterable, Identifiable {
 }
 
 struct StudioView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var library = ModelLibrary()
     @State private var selectedTab: StudioTab = .home
     @State private var importerOpen = false
@@ -260,6 +262,17 @@ struct StudioView: View {
     @State private var voiceText = ""
     @State private var voice = "John"
     @State private var voiceFile: URL?
+    @State private var voicePlayer: AVPlayer?
+    @State private var voicePlaying = false
+    @FocusState private var voiceTextFocused: Bool
+
+    private var keepsScreenAwake: Bool {
+        library.downloading || working || importing || savingVideo != nil
+    }
+
+    private func updateIdleTimer() {
+        UIApplication.shared.isIdleTimerDisabled = scenePhase == .active && keepsScreenAwake
+    }
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -283,6 +296,10 @@ struct StudioView: View {
         .onChange(of: working) { _, isWorking in
             if !isWorking { progressExpanded = false }
         }
+        .onAppear { updateIdleTimer() }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+        .onChange(of: keepsScreenAwake) { _, _ in updateIdleTimer() }
+        .onChange(of: scenePhase) { _, _ in updateIdleTimer() }
         .fileImporter(isPresented: $importerOpen, allowedContentTypes: [.item]) { result in
             switch result {
             case .success(let url): importMedia(url)
@@ -298,7 +315,15 @@ struct StudioView: View {
             SessionLog.shared.refresh()
         }
         .onChange(of: selectedTab) { _, tab in
+            voiceTextFocused = false
             SessionLog.shared.write("Tab \(String(describing: tab))")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification)
+            .receive(on: RunLoop.main)) { notification in
+            if let item = notification.object as? AVPlayerItem, item === voicePlayer?.currentItem {
+                voicePlaying = false
+                voicePlayer = nil
+            }
         }
         .onChange(of: selectedPhoto) { _, item in
             guard let item else { return }
@@ -316,7 +341,11 @@ struct StudioView: View {
                     .padding(.top, 12)
                     .padding(.bottom, 32)
             }
-            .background(StudioStyle.background.ignoresSafeArea())
+            .scrollDismissesKeyboard(.interactively)
+            .background {
+                StudioStyle.background.ignoresSafeArea()
+                    .onTapGesture { voiceTextFocused = false }
+            }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.large)
         }
@@ -612,44 +641,67 @@ struct StudioView: View {
             .disabled(library.downloading || working)
             ForEach(Array(RivaQuality.allCases.reversed())) { quality in
                 let selected = library.selectedRiva == quality
-                let installed = FileManager.default.fileExists(atPath: quality.path.path)
-                Button {
-                    library.select(quality)
-                } label: {
-                    HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(selected ? StudioStyle.accent : StudioStyle.muted)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("\(quality.rawValue) · \(quality.sizeGB) GB")
-                                .font(.subheadline.weight(.semibold))
-                            Text(quality.description)
-                                .font(.caption).foregroundStyle(StudioStyle.muted)
-                            if quality == library.recommendedRiva {
-                                Text("Consigliato per questo dispositivo")
-                                    .font(.caption2.bold()).foregroundStyle(StudioStyle.accent)
+                let installed = library.models.first { $0.id == "riva:\(quality.rawValue)" }?.installed ?? false
+                VStack(alignment: .leading, spacing: 6) {
+                    Button {
+                        library.select(quality)
+                    } label: {
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(selected ? StudioStyle.accent : StudioStyle.muted)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(quality.rawValue) · \(quality.sizeGB) GB")
+                                    .font(.subheadline.weight(.semibold))
+                                Text(quality.description)
+                                    .font(.caption).foregroundStyle(StudioStyle.muted)
+                                if quality == library.recommendedRiva {
+                                    Text("Consigliato per questo dispositivo")
+                                        .font(.caption2.bold()).foregroundStyle(StudioStyle.accent)
+                                }
+                            }
+                            Spacer()
+                            if installed {
+                                Image(systemName: "internaldrive.fill")
+                                    .foregroundStyle(StudioStyle.accent)
                             }
                         }
-                        Spacer()
-                        if installed {
-                            Image(systemName: "internaldrive.fill")
-                                .foregroundStyle(StudioStyle.accent)
-                        }
+                        .foregroundStyle(.white)
+                        .padding(12)
+                        .background(selected ? StudioStyle.accent.opacity(0.13) : StudioStyle.background,
+                                    in: RoundedRectangle(cornerRadius: 14))
+                        .overlay(RoundedRectangle(cornerRadius: 14)
+                            .strokeBorder(selected ? StudioStyle.accent : StudioStyle.muted.opacity(0.2)))
                     }
-                    .foregroundStyle(.white)
-                    .padding(12)
-                    .background(selected ? StudioStyle.accent.opacity(0.13) : StudioStyle.background,
-                                in: RoundedRectangle(cornerRadius: 14))
-                    .overlay(RoundedRectangle(cornerRadius: 14)
-                        .strokeBorder(selected ? StudioStyle.accent : StudioStyle.muted.opacity(0.2)))
+                    .buttonStyle(.plain)
+                    .disabled(library.downloading || working)
+                    if installed {
+                        Button("Elimina \(quality.rawValue)", role: .destructive) {
+                            do { try library.deleteModel("riva:\(quality.rawValue)") }
+                            catch {
+                                let message = "Impossibile eliminare Riva \(quality.rawValue): \(error.localizedDescription)"
+                                info = message
+                                SessionLog.shared.write(message, always: true)
+                            }
+                        }
+                        .font(.caption)
+                        .disabled(library.downloading || working)
+                        if selected && !library.ready {
+                            Button("Verifica \(quality.rawValue)") { library.downloadModel("riva:\(quality.rawValue)") }
+                                .font(.caption)
+                                .disabled(library.downloading || working)
+                        }
+                    } else if selected {
+                        Button("Scarica \(quality.rawValue)") { library.downloadModel("riva:\(quality.rawValue)") }
+                            .font(.caption)
+                            .disabled(library.downloading || working)
+                    }
                 }
-                .buttonStyle(.plain)
-                .disabled(library.downloading || working)
             }
             Text("Q8 è la qualità più alta disponibile, ma non è ancora verificata su tutti i dispositivi. Puoi selezionarla manualmente.")
                 .font(.caption).foregroundStyle(StudioStyle.muted)
             Text("Modelli per voce e sottotitoli")
                 .font(.subheadline.bold())
-            ForEach(library.models) { model in
+            ForEach(library.models.filter { !$0.id.hasPrefix("riva:") }) { model in
                 HStack(spacing: 8) {
                     Image(systemName: model.installed ? "checkmark.circle.fill" : "circle.dashed")
                         .foregroundStyle(model.installed ? StudioStyle.accent : StudioStyle.muted)
@@ -659,8 +711,9 @@ struct StudioView: View {
                         Button("Elimina") {
                             do { try library.deleteModel(model.id) }
                             catch {
-                                status = "Impossibile eliminare \(model.name): \(error.localizedDescription)"
-                                SessionLog.shared.write(status, always: true)
+                                let message = "Impossibile eliminare \(model.name): \(error.localizedDescription)"
+                                info = message
+                                SessionLog.shared.write(message, always: true)
                             }
                         }
                         .tint(.orange)
@@ -934,6 +987,13 @@ struct StudioView: View {
         VStack(alignment: .leading, spacing: 11) {
             Label("Voce Magpie", systemImage: "waveform.badge.mic").font(.headline)
             TextField("Testo da pronunciare", text: $voiceText, axis: .vertical)
+                .focused($voiceTextFocused)
+                .toolbar {
+                    ToolbarItemGroup(placement: .keyboard) {
+                        Spacer()
+                        Button("Fine") { voiceTextFocused = false }
+                    }
+                }
                 .lineLimit(2...5).padding(10).background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 11))
             Picker("Voce", selection: $voice) {
                 ForEach(["John", "Sofia", "Jason", "Aria", "Leo"], id: \.self) { Text($0).tag($0) }
@@ -945,6 +1005,18 @@ struct StudioView: View {
                 .disabled(!library.ready || voiceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || working)
                 .buttonStyle(.borderedProminent).tint(StudioStyle.accent).controlSize(.large)
             if let voiceFile {
+                Button {
+                    if voicePlaying {
+                        voicePlayer?.pause()
+                        voicePlaying = false
+                    } else {
+                        do { try playVoice(voiceFile) }
+                        catch { info = "Riproduzione non riuscita: \(error.localizedDescription)" }
+                    }
+                } label: {
+                    Label(voicePlaying ? "Pausa" : "Riproduci", systemImage: voicePlaying ? "pause.fill" : "play.fill")
+                }
+                .foregroundStyle(StudioStyle.accent)
                 ShareLink(item: voiceFile) { Label("Condividi WAV", systemImage: "square.and.arrow.up") }
                     .foregroundStyle(StudioStyle.accent)
             }
@@ -1023,6 +1095,11 @@ struct StudioView: View {
     }
 
     private func synthesize() {
+        voiceTextFocused = false
+        voicePlayer?.pause()
+        voicePlayer = nil
+        voicePlaying = false
+        voiceFile = nil
         activeStages = []
         working = true
         status = "MagpieTTS genera la voce..."
@@ -1034,11 +1111,14 @@ struct StudioView: View {
                 let worker = Task.detached(priority: .userInitiated) {
                     try await StudioPipeline.synthesize(text, voice: selectedVoice, language: "it")
                 }
-                voiceFile = try await withTaskCancellationHandler(operation: {
+                let generatedFile = try await withTaskCancellationHandler(operation: {
                     try await worker.value
                 }, onCancel: { worker.cancel() })
+                voiceFile = generatedFile
                 status = "WAV pronto"
                 SessionLog.shared.write("Magpie WAV ready: \(voiceFile?.lastPathComponent ?? "unknown")", always: true)
+                do { try playVoice(generatedFile) }
+                catch { info = "WAV creato, ma riproduzione non riuscita: \(error.localizedDescription)" }
             } catch {
                 status = "Errore voce: \(error.localizedDescription)"
                 SessionLog.shared.write("Magpie failed: \(String(reflecting: error))", always: true)
@@ -1046,6 +1126,14 @@ struct StudioView: View {
             working = false
             job = nil
         }
+    }
+
+    private func playVoice(_ url: URL) throws {
+        try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+        try AVAudioSession.sharedInstance().setActive(true)
+        if voicePlayer == nil { voicePlayer = AVPlayer(url: url) }
+        voicePlayer?.play()
+        voicePlaying = true
     }
 
     private func importMedia(_ url: URL) {

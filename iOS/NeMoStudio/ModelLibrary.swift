@@ -111,14 +111,17 @@ final class ModelLibrary: ObservableObject {
             ("nemotron", "Nemotron 3.5", asr?.appendingPathComponent("encoder.mlmodelc")),
             ("sortformer", "Sortformer", sort?.appendingPathComponent("Sortformer.mlmodelc")),
             ("magpie", "Magpie", magpie?.appendingPathComponent("nanocodec_decoder/model.safetensors")),
-            ("riva", "Riva 4B \(selectedRiva.rawValue)", selectedRiva.path)
-        ]
+        ] + RivaQuality.allCases.map { quality in
+            ("riva:\(quality.rawValue)", "Riva 4B \(quality.rawValue)", Optional(quality.path))
+        }
         models = files.map { id, name, file in
             ModelPresence(id: id, name: name,
                           installed: file.map { FileManager.default.fileExists(atPath: $0.path) } ?? false)
         }
         let marker = try? String(contentsOf: Self.verifiedMarker, encoding: .utf8)
-        ready = marker == "Riva SHA-256: \(selectedRiva.hash)" && models.allSatisfy(\.installed)
+        ready = marker == "Riva SHA-256: \(selectedRiva.hash)"
+            && models.filter { !$0.id.hasPrefix("riva:") || $0.id == "riva:\(selectedRiva.rawValue)" }
+                .allSatisfy(\.installed)
         if !downloading {
             status = ready ? "Tutti i modelli sono già sul tuo iPhone" : "Scarica i modelli mancanti per iniziare"
         }
@@ -153,7 +156,10 @@ final class ModelLibrary: ObservableObject {
 
     func downloadAll() { download(ids: ["nemotron", "sortformer", "magpie", "riva"]) }
 
-    func downloadModel(_ id: String) { download(ids: [id]) }
+    func downloadModel(_ id: String) {
+        guard !id.hasPrefix("riva:") || id == "riva:\(selectedRiva.rawValue)" else { return }
+        download(ids: [id.hasPrefix("riva:") ? "riva" : id])
+    }
 
     private func download(ids: Set<String>) {
         guard !downloading else { return }
@@ -207,7 +213,8 @@ final class ModelLibrary: ObservableObject {
                 try await Self.downloadRiva(quality, progress: reportProgress(base: 0.75, weight: 0.25, model: "Riva"))
                 }
                 refreshPresence()
-                if models.allSatisfy(\.installed) {
+                if models.filter({ !$0.id.hasPrefix("riva:") || $0.id == "riva:\(quality.rawValue)" })
+                    .allSatisfy(\.installed) {
                     // Check the selected file even when it was installed in an older session.
                     guard try Self.sha256(quality.path) == quality.hash else {
                         throw DownloadError.checksumMismatch(file: quality.file, expected: quality.hash,
@@ -244,17 +251,21 @@ final class ModelLibrary: ObservableObject {
         case "nemotron": destination = try Self.modelDirectory(NemotronStreamingASRModel.defaultModelId)
         case "sortformer": destination = try Self.modelDirectory(SortformerDiarizer.defaultModelId)
         case "magpie": destination = try Self.modelDirectory(MagpieTTSVariant.int8.huggingFaceRepoId)
-        case "riva": destination = selectedRiva.path
+        case let rivaID where rivaID.hasPrefix("riva:"):
+            guard let quality = RivaQuality(rawValue: String(rivaID.dropFirst("riva:".count))) else { return }
+            destination = quality.path
         default: return
         }
         if FileManager.default.fileExists(atPath: destination.path) {
             try FileManager.default.removeItem(at: destination)
         }
-        if id == "riva" {
+        if id.hasPrefix("riva:") {
             let partial = destination.appendingPathExtension("part")
             if FileManager.default.fileExists(atPath: partial.path) { try FileManager.default.removeItem(at: partial) }
         }
-        try? FileManager.default.removeItem(at: Self.verifiedMarker)
+        if !id.hasPrefix("riva:") || id == "riva:\(selectedRiva.rawValue)" {
+            try? FileManager.default.removeItem(at: Self.verifiedMarker)
+        }
         refreshPresence()
         SessionLog.shared.write("Model removed id=\(id) name=\(destination.lastPathComponent)", always: true)
     }
