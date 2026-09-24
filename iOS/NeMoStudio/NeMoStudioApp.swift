@@ -332,7 +332,7 @@ struct StudioView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if working { processingBar }
+            if working && !activeStages.isEmpty { processingBar }
         }
     }
 
