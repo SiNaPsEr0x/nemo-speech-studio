@@ -68,12 +68,12 @@ enum MatroskaMuxer {
             element([0x44, 0x89], floating(duration * 1000)) +
             element([0x4D, 0x80], Data("NeMo Studio".utf8)) +
             element([0x57, 0x41], Data("NeMo Studio iOS".utf8)))
-        FileManager.default.createFile(atPath: output.path, contents: nil)
+        _ = FileManager.default.createFile(atPath: output.path, contents: nil)
         let file = try FileHandle(forWritingTo: output)
         defer { try? file.close() }
         try file.write(contentsOf: ebmlHeader())
         try file.write(contentsOf: Data(segmentID) + unknownSize)
-        let segmentStart = file.offsetInFile
+        let segmentStart = try file.offset()
         try file.write(contentsOf: info)
         try file.write(contentsOf: element([0x16, 0x54, 0xAE, 0x6B], entries))
 
@@ -94,7 +94,7 @@ enum MatroskaMuxer {
             guard current != Int.max else { break }
             if clusterTime < 0 || current - clusterTime >= 20_000 || current - clusterTime < -32_000 {
                 clusterTime = max(0, current)
-                clusterOffset = file.offsetInFile - segmentStart
+                clusterOffset = try file.offset() - segmentStart
                 try file.write(contentsOf: Data([0x1F, 0x43, 0xB6, 0x75]) + unknownSize)
                 try file.write(contentsOf: element([0xE7], unsigned(UInt64(clusterTime))))
             }
