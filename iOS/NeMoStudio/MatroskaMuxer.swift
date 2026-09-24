@@ -13,7 +13,7 @@ enum MatroskaMuxer {
               let videoFormat = try await video.load(.formatDescriptions).first,
               let audioFormat = try await audio.load(.formatDescriptions).first,
               let sound = CMAudioFormatDescriptionGetStreamBasicDescription(audioFormat) else {
-            throw MediaComposerError.unsupported
+            throw unsupported("traccia video/audio o descrizione AAC mancante")
         }
         let codec = CMFormatDescriptionGetMediaSubType(videoFormat)
         let atomName: String
@@ -21,37 +21,37 @@ enum MatroskaMuxer {
         switch codec {
         case kCMVideoCodecType_H264: (atomName, codecID) = ("avcC", "V_MPEG4/ISO/AVC")
         case kCMVideoCodecType_HEVC: (atomName, codecID) = ("hvcC", "V_MPEGH/ISO/HEVC")
-        default: throw MediaComposerError.unsupported
+        default: throw unsupported("codec video diverso da H.264/HEVC")
         }
         guard CMFormatDescriptionGetMediaSubType(audioFormat) == kAudioFormatMPEG4AAC,
               let atoms = CMFormatDescriptionGetExtension(videoFormat,
                   extensionKey: kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms) as? [String: Any],
               let codecPrivate = atoms[atomName] as? Data,
-              !codecPrivate.isEmpty else { throw MediaComposerError.unsupported }
+              !codecPrivate.isEmpty else { throw unsupported("configurazione \(atomName) o codec AAC mancante") }
         let rate = Int(sound.pointee.mSampleRate.rounded())
         let channels = Int(sound.pointee.mChannelsPerFrame)
         let samplingRates = [96_000, 88_200, 64_000, 48_000, 44_100, 32_000,
                              24_000, 22_050, 16_000, 12_000, 11_025, 8_000, 7_350]
         guard let frequency = samplingRates.firstIndex(of: rate), (1...7).contains(channels) else {
-            throw MediaComposerError.unsupported
+            throw unsupported("frequenza o canali AAC non supportati")
         }
         let aacPrivate = Data([UInt8((2 << 3) | (frequency >> 1)),
                                UInt8(((frequency & 1) << 7) | (channels << 3))])
         let size = try await video.load(.naturalSize)
         let duration = CMTimeGetSeconds(try await asset.load(.duration))
         guard size.width > 0, size.height > 0, duration.isFinite, duration > 0 else {
-            throw MediaComposerError.unsupported
+            throw unsupported("dimensioni o durata del video non valide")
         }
 
         let reader = try AVAssetReader(asset: asset)
         let videoOutput = AVAssetReaderTrackOutput(track: video, outputSettings: nil)
         let audioOutput = AVAssetReaderTrackOutput(track: audio, outputSettings: nil)
         guard reader.canAdd(videoOutput), reader.canAdd(audioOutput) else {
-            throw MediaComposerError.unsupported
+            throw unsupported("AVAssetReader non accetta le tracce compresse")
         }
         reader.add(videoOutput)
         reader.add(audioOutput)
-        guard reader.startReading() else { throw reader.error ?? MediaComposerError.unsupported }
+        guard reader.startReading() else { throw reader.error ?? unsupported("avvio lettura fallito") }
         defer { if reader.status == .reading { reader.cancelReading() } }
 
         var entries = Data()
@@ -125,7 +125,7 @@ enum MatroskaMuxer {
                 if translatedCue { translatedIndex += 1 } else { originalIndex += 1 }
             }
         }
-        guard reader.status == .completed else { throw reader.error ?? MediaComposerError.unsupported }
+        guard reader.status == .completed else { throw reader.error ?? unsupported("lettura delle tracce non completata: \(reader.status.rawValue)") }
         var points = Data()
         for cue in cues {
             let position = element([0xF7], unsigned(1)) + element([0xF1], unsigned(cue.1))
@@ -133,6 +133,11 @@ enum MatroskaMuxer {
                                   element([0xB7], position)))
         }
         try file.write(contentsOf: element([0x1C, 0x53, 0xBB, 0x6B], points))
+    }
+
+    private static func unsupported(_ reason: String) -> NSError {
+        NSError(domain: "NeMoStudio.MatroskaMuxer", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Esportazione MKV: \(reason)."])
     }
 
     private static let unknownSize = Data([0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
@@ -176,14 +181,14 @@ enum MatroskaMuxer {
 
     private static func block(sample: CMSampleBuffer, track: Int, relative: Int,
                               keyframe: Bool) throws -> Data {
-        guard let buffer = CMSampleBufferGetDataBuffer(sample) else { throw MediaComposerError.unsupported }
+        guard let buffer = CMSampleBufferGetDataBuffer(sample) else { throw unsupported("campione senza dati compressi") }
         var contents = Data(count: CMBlockBufferGetDataLength(buffer))
         let status = contents.withUnsafeMutableBytes { raw -> OSStatus in
             guard let address = raw.baseAddress else { return -1 }
             return CMBlockBufferCopyDataBytes(buffer, atOffset: 0, dataLength: raw.count,
                                               destination: address)
         }
-        guard status == noErr else { throw MediaComposerError.unsupported }
+        guard status == noErr else { throw unsupported("copia dei dati compressi non riuscita: \(status)") }
         return block(track: track, relative: relative, keyframe: keyframe, payload: contents)
     }
 
