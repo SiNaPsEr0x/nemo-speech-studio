@@ -795,6 +795,7 @@ struct StudioView: View {
     }
 
     private func synthesize() {
+        activeStages = []
         working = true
         status = "MagpieTTS genera la voce..."
         let text = voiceText
