@@ -549,6 +549,14 @@ struct StudioView: View {
         }.card()
     }
 
+    private func isVideo(_ url: URL) -> Bool {
+        ["mp4", "mov", "mkv"].contains(url.pathExtension.lowercased())
+    }
+
+    private var displayFiles: [URL] {
+        files.filter(isVideo) + files.filter { !isVideo($0) }
+    }
+
     private var resultsCard: some View {
         VStack(alignment: .leading, spacing: 18) {
             if lines.isEmpty {
@@ -585,10 +593,10 @@ struct StudioView: View {
             if !files.isEmpty {
                 Divider().overlay(StudioStyle.muted.opacity(0.4))
                 Text("File pronti").font(.headline)
-                ForEach(files, id: \.self) { file in
+                ForEach(displayFiles, id: \.self) { file in
                     ShareLink(item: file) {
                         HStack {
-                            Image(systemName: "doc.fill")
+                            Image(systemName: isVideo(file) ? "film.fill" : "doc.fill")
                             Text(file.lastPathComponent).lineLimit(2)
                             Spacer()
                             Image(systemName: "square.and.arrow.up")
@@ -636,13 +644,15 @@ struct StudioView: View {
         translated = []
         status = "Avvio modello locale..."
         let selectedLanguage = language
-        let selectedTarget = translate && targetLanguage != String(language.prefix(2)) ? targetLanguage : nil
+        let selectedTarget = (translate || mode.requiresTranslation) ? targetLanguage : nil
         let useDiarization = diarization
-        let makeSubtitles = mode != .transcription && mode != .dubbing
+        let makeSubtitles = mode != .transcription && mode != .dubbing && mode != .translatedVideo
         let makeSoft = mode == .softSubtitles || mode == .complete
-        let makeDubbing = mode == .dubbing || mode == .complete
-        let makeBurnIn = mode == .burnIn || mode == .complete
-        let strictExports = mode == .complete
+        let makeDubbing = mode == .dubbing || mode == .complete || mode == .translatedVideo
+        let makeBurnIn = mode == .burnIn || mode == .burnTranslated || mode == .complete
+        let burnTranslated = mode == .burnTranslated || (mode == .complete && translate)
+        let dubbedOnly = mode == .translatedVideo
+        let strictExports = mode == .complete || mode == .burnIn || mode == .burnTranslated || dubbedOnly
         let startedAt = Date()
         SessionLog.shared.write("Job start mode=\(mode.rawValue) language=\(selectedLanguage) target=\(selectedTarget ?? "none") diarization=\(useDiarization) subtitles=\(makeSubtitles) soft=\(makeSoft) dubbing=\(makeDubbing) burnIn=\(makeBurnIn) media=\(selectedFile.lastPathComponent)", always: true)
         job = Task {
@@ -652,7 +662,8 @@ struct StudioView: View {
                                                      targetLanguage: selectedTarget,
                                                      diarization: useDiarization, subtitles: makeSubtitles,
                                                      softSubtitles: makeSoft, dubbing: makeDubbing,
-                                                     burnIn: makeBurnIn, strictExports: strictExports) { phase in
+                                                     burnIn: makeBurnIn, burnTranslated: burnTranslated,
+                                                     dubbedOnly: dubbedOnly, strictExports: strictExports) { phase in
                         SessionLog.shared.write("Pipeline phase: \(phase)")
                         Task { @MainActor in self.status = phase }
                     }
@@ -728,6 +739,7 @@ struct StudioView: View {
                 if let previous = selectedFile { try? FileManager.default.removeItem(at: previous) }
                 selectedFile = destination
                 selectedHasVideo = hasVideo
+                if hasVideo && mode == .transcription { mode = .burnIn }
                 let bytes = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 SessionLog.shared.write("Import complete file=\(destination.lastPathComponent) bytes=\(bytes)", always: true)
             } catch {
@@ -757,6 +769,7 @@ struct StudioView: View {
                 if let previous = selectedFile { try? FileManager.default.removeItem(at: previous) }
                 selectedFile = movie.url
                 selectedHasVideo = hasVideo
+                if hasVideo && mode == .transcription { mode = .burnIn }
                 SessionLog.shared.write("Photos import complete file=\(movie.url.lastPathComponent)", always: true)
             } catch {
                 info = "Video dalla galleria non importato: \(error.localizedDescription)"
