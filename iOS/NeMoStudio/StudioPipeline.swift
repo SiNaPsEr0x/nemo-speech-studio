@@ -79,8 +79,16 @@ enum StudioPipeline {
                 cacheDir: sortPath, offlineMode: true)
             try Task.checkCancellation()
             progress("Riconosco i parlanti")
-            let samples = try AudioFileLoader.load(url: audio, targetSampleRate: 16_000)
-            speakers = diarizer.diarize(audio: samples, sampleRate: 16_000).segments
+            let speakerSession = diarizer.makeStreamingSession()
+            // Avoid holding the complete audio of a long video in RAM.
+            let audioStream = AudioFileLoader.stream(
+                url: audio,
+                options: AudioFileStreamOptions(targetSampleRate: 16_000, chunkDuration: 30))
+            for try await chunk in audioStream {
+                try Task.checkCancellation()
+                _ = try speakerSession.push(audio: chunk.samples)
+            }
+            speakers = try speakerSession.finish().segments
         }
 
         let lines = makeLines(words: timedWords, speakers: speakers)

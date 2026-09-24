@@ -7,7 +7,7 @@ import UIKit
 final class StudioAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      handleEventsForBackgroundURLSession identifier: String,
-                     completionHandler: @escaping () -> Void) {
+                     completionHandler: @escaping @Sendable () -> Void) {
         HuggingFaceDownloader.handleBackgroundSessionEvents(
             identifier: identifier, completionHandler: completionHandler)
     }
@@ -125,6 +125,7 @@ struct StudioView: View {
     @StateObject private var library = ModelLibrary()
     @State private var importerOpen = false
     @State private var selectedFile: URL?
+    @State private var importing = false
     @State private var mode: StudioMode = .transcription
     @State private var info: String?
     @State private var debugEnabled = UserDefaults.standard.bool(forKey: "debugEnabled")
@@ -221,7 +222,7 @@ struct StudioView: View {
                 VStack(spacing: 8) {
                     Image(systemName: selectedFile == nil ? "plus.circle.fill" : "waveform")
                         .font(.system(size: 33)).foregroundStyle(StudioStyle.accent)
-                    Text(selectedFile?.lastPathComponent ?? "Scegli audio o video")
+                    Text(importing ? "Copio il file in locale…" : (selectedFile?.lastPathComponent ?? "Scegli audio o video"))
                         .font(.subheadline.weight(.semibold)).lineLimit(2)
                     Text("Il file viene copiato nello spazio privato dell’app")
                         .font(.caption).foregroundStyle(StudioStyle.muted)
@@ -230,6 +231,7 @@ struct StudioView: View {
                 .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 17))
             }
             .buttonStyle(.plain)
+            .disabled(importing)
         }.card()
     }
 
@@ -294,7 +296,7 @@ struct StudioView: View {
                 .font(.caption).foregroundStyle(StudioStyle.muted)
             Button(working ? "Elaborazione in corso" : "Avvia elaborazione") { start() }
                 .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
-                .disabled(working || !library.ready || selectedFile == nil || !mode.available || (translate && language == "auto"))
+                .disabled(working || importing || !library.ready || selectedFile == nil || !mode.available || (translate && language == "auto"))
                 .frame(maxWidth: .infinity)
             if working { Button("Stop elaborazione") { job?.cancel() }.foregroundStyle(.orange) }
             if !status.isEmpty { Text(status).font(.caption).foregroundStyle(StudioStyle.accent) }
@@ -435,17 +437,25 @@ struct StudioView: View {
     }
 
     private func importMedia(_ url: URL) {
-        let access = url.startAccessingSecurityScopedResource()
-        defer { if access { url.stopAccessingSecurityScopedResource() } }
-        let destination = AppStoragePaths.temporary.appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
-        do {
-            try FileManager.default.copyItem(at: url, to: destination)
-            if let previous = selectedFile { try? FileManager.default.removeItem(at: previous) }
-            selectedFile = destination
-            SessionLog.shared.write("Media importato: \(destination.lastPathComponent)")
-        } catch {
-            info = "Copia non riuscita: \(error.localizedDescription)"
-            SessionLog.shared.write("Copia media fallita: \(error.localizedDescription)", always: true)
+        importing = true
+        Task {
+            do {
+                let destination = try await Task.detached(priority: .utility) {
+                    let access = url.startAccessingSecurityScopedResource()
+                    defer { if access { url.stopAccessingSecurityScopedResource() } }
+                    let destination = AppStoragePaths.temporary.appendingPathComponent(
+                        UUID().uuidString + "-" + url.lastPathComponent)
+                    try FileManager.default.copyItem(at: url, to: destination)
+                    return destination
+                }.value
+                if let previous = selectedFile { try? FileManager.default.removeItem(at: previous) }
+                selectedFile = destination
+                SessionLog.shared.write("Media importato: \(destination.lastPathComponent)")
+            } catch {
+                info = "Copia non riuscita: \(error.localizedDescription)"
+                SessionLog.shared.write("Copia media fallita: \(error.localizedDescription)", always: true)
+            }
+            importing = false
         }
     }
 }

@@ -5,6 +5,19 @@ import MagpieTTS
 import NemotronStreamingASR
 import SpeechVAD
 
+enum ModelStorageError: LocalizedError {
+    case insufficient(required: Int64, available: Int64)
+
+    var errorDescription: String? {
+        switch self {
+        case .insufficient(let required, let available):
+            let format = ByteCountFormatter()
+            format.countStyle = .file
+            return "Spazio insufficiente: servono \(format.string(fromByteCount: required)), disponibili \(format.string(fromByteCount: available)). Libera spazio e premi Riprendi."
+        }
+    }
+}
+
 // The explicit user action that fills persistent storage. Inference uses local bundles only.
 @MainActor
 final class ModelLibrary: ObservableObject {
@@ -19,7 +32,8 @@ final class ModelLibrary: ObservableObject {
             let asr = try? Self.modelDirectory(NemotronStreamingASRModel.defaultModelId)
             let sort = try? Self.modelDirectory(SortformerDiarizer.defaultModelId)
             let magpie = try? Self.modelDirectory(MagpieTTSVariant.int8.huggingFaceRepoId)
-            ready = [asr?.appendingPathComponent("encoder.mlmodelc"),
+            ready = [Self.verifiedMarker,
+                     asr?.appendingPathComponent("encoder.mlmodelc"),
                      sort?.appendingPathComponent("Sortformer.mlmodelc"),
                      magpie?.appendingPathComponent("nanocodec_decoder/model.safetensors"),
                      Self.rivaPath].allSatisfy { $0.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
@@ -27,10 +41,19 @@ final class ModelLibrary: ObservableObject {
         }
     }
 
-    static let rivaFile = "Riva-Translate-4B-Instruct-v2-Q4_K_M.gguf"
+    nonisolated static let rivaFile = "Riva-Translate-4B-Instruct-v2-Q4_K_M.gguf"
     static let rivaHash = "90c2f48ff5549b770d9aaecb7eea603548bcca035a970a800d9c17781991804d"
     static let rivaURL = URL(string: "https://huggingface.co/liodon-ai/Riva-Translate-4B-Instruct-v2-imatrix-GGUF/resolve/main/Riva-Translate-4B-Instruct-v2-Q4_K_M.gguf?download=true")!
-    static let rivaPath = AppStoragePaths.models.appendingPathComponent(rivaFile)
+    nonisolated static let rivaPath = AppStoragePaths.models.appendingPathComponent(rivaFile)
+    static let verifiedMarker = AppStoragePaths.models.appendingPathComponent("models-verified-v1.txt")
+
+    private static func ensureSpace(_ minimum: Int64) throws {
+        let values = try AppStoragePaths.models.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        if let available = values.volumeAvailableCapacityForImportantUsage, available < minimum {
+            throw ModelStorageError.insufficient(required: minimum, available: available)
+        }
+    }
 
     static func modelDirectory(_ modelId: String) throws -> URL {
         try HuggingFaceDownloader.getCacheDirectory(for: modelId)
@@ -42,6 +65,7 @@ final class ModelLibrary: ObservableObject {
         ready = false
         work = Task {
             do {
+                try Self.ensureSpace(512 * 1024 * 1024)
                 let asrID = NemotronStreamingASRModel.defaultModelId
                 status = "Nemotron 3.5: download/resume + verifica SHA"
                 let asrPath = try Self.modelDirectory(asrID)
@@ -69,6 +93,8 @@ final class ModelLibrary: ObservableObject {
                 try await Self.downloadRiva { value in
                     Task { @MainActor in self.fraction = 0.75 + 0.25 * value }
                 }
+                try ("Riva SHA-256: " + Self.rivaHash).write(
+                    to: Self.verifiedMarker, atomically: true, encoding: .utf8)
                 fraction = 1
                 ready = true
                 status = "Modelli pronti sul dispositivo"
@@ -96,6 +122,7 @@ final class ModelLibrary: ObservableObject {
         var total: Int64?
         repeat {
             try Task.checkCancellation()
+            try ensureSpace(256 * 1024 * 1024)
             let end = offset + 8 * 1024 * 1024 - 1
             var request = URLRequest(url: rivaURL)
             request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
@@ -147,7 +174,11 @@ final class ModelLibrary: ObservableObject {
             } else {
                 throw URLError(.badServerResponse)
             }
-            if let total, total > 0 { progress(min(1, Double(offset) / Double(total))) }
+            if let total, total > 0 {
+                // The next download chunk has its own temporary file; keep headroom.
+                if offset < total { try ensureSpace(total - offset + 256 * 1024 * 1024) }
+                progress(min(1, Double(offset) / Double(total)))
+            }
         } while total.map { offset < $0 } ?? true
         let actual = try sha256(part)
         guard actual == rivaHash else {

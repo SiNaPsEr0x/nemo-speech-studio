@@ -26,7 +26,7 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Validate settings property list
-        run: plutil -lint iOS/NeMoStudio/Settings.bundle/Root.plist
+        run: plutil -lint iOS/NeMoStudio/Settings.bundle/Root.plist iOS/NeMoStudio/PrivacyInfo.xcprivacy
       - name: Generate Xcode project
         working-directory: iOS
         run: xcodegen generate
