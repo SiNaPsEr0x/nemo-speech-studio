@@ -36,7 +36,7 @@ Il launcher mostra l'indirizzo della UI locale. I risultati completati vengono s
 
 ## Dati e componenti esterni
 
-Questa repository contiene soltanto il launcher. Il runtime, i modelli, i download, i file temporanei, i log e i risultati restano sul PC: **non caricarli nella repository**. La traduzione opzionale scarica un GGUF di Riva Translate da Hugging Face e ne controlla l'hash SHA-256.
+La repository contiene il launcher Windows e [NeMo Studio per iOS](iOS/README.md), con l'[IPA unsigned nella Release iOS](https://github.com/SiNaPsEr0x/nemo-speech-studio/releases/tag/ios-current), non i pesi. Il runtime, i modelli, i download, i file temporanei, i log e i risultati restano sul dispositivo: **non caricarli nella repository**. La traduzione opzionale scarica un GGUF di Riva Translate da Hugging Face e ne controlla l'hash SHA-256.
 
 NeMo Studio è un progetto indipendente, non un prodotto ufficiale NVIDIA. NeMo-Speech.cpp e i modelli sono distribuiti dai rispettivi titolari secondo le loro condizioni. Nessun binario o peso di modello è incluso qui.
 
