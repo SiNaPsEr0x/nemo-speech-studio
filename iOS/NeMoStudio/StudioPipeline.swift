@@ -42,6 +42,7 @@ enum StudioPipeline {
         diarization: Bool,
         subtitles: Bool,
         dubbing: Bool,
+        burnIn: Bool,
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> StudioResult {
         progress("Preparo la traccia audio")
@@ -144,6 +145,25 @@ enum StudioPipeline {
                     SessionLog.shared.write(warning, always: true)
                     warnings.append(warning)
                 }
+            }
+        }
+        if burnIn {
+            try Task.checkCancellation()
+            progress("Imprimo i sottotitoli nel video MP4")
+            let video = directory.appendingPathComponent("video-sottotitolato.mp4")
+            do {
+                try await MediaComposer.burnSubtitles(
+                    video: source, lines: translated.isEmpty ? lines : translated,
+                    output: video)
+                files.append(video)
+            } catch is CancellationError {
+                try? FileManager.default.removeItem(at: video)
+                throw CancellationError()
+            } catch {
+                try? FileManager.default.removeItem(at: video)
+                let warning = "MP4 non disponibile: \(error.localizedDescription). SRT e ASS pronti."
+                SessionLog.shared.write(warning, always: true)
+                warnings.append(warning)
             }
         }
         progress("Pronto")

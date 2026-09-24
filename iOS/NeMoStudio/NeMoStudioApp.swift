@@ -118,7 +118,9 @@ private enum StudioMode: String, CaseIterable, Identifiable {
     case dubbing = "Doppiaggio"
     case complete = "Tutto"
     var id: String { rawValue }
-    var available: Bool { self == .transcription || self == .subtitles || self == .dubbing }
+    var available: Bool {
+        self == .transcription || self == .subtitles || self == .dubbing || self == .burnIn
+    }
 }
 
 struct StudioView: View {
@@ -294,6 +296,8 @@ struct StudioView: View {
             }
             Text(mode == .dubbing
                  ? "WAV dei parlanti; per MP4/MOV compatibili creo anche un MOV con audio originale e doppiaggio selezionabili."
+                 : mode == .burnIn
+                    ? "SRT/ASS e MP4 con sottotitoli impressi nei video compatibili."
                  : (mode.available
                     ? "Nemotron 3.5, Sortformer e Riva elaborano sul dispositivo. I modelli vanno scaricati una sola volta."
                     : "Questo preset richiede ancora produzione video iOS: non produce risultati simulati."))
@@ -368,15 +372,16 @@ struct StudioView: View {
         let selectedLanguage = language
         let selectedTarget = translate && targetLanguage != String(language.prefix(2)) ? targetLanguage : nil
         let useDiarization = diarization
-        let makeSubtitles = mode == .subtitles
+        let makeSubtitles = mode == .subtitles || mode == .burnIn
         let makeDubbing = mode == .dubbing
+        let makeBurnIn = mode == .burnIn
         job = Task {
             do {
                 let worker = Task.detached(priority: .userInitiated) {
                     try await StudioPipeline.process(source: selectedFile, language: selectedLanguage,
                                                      targetLanguage: selectedTarget,
                                                      diarization: useDiarization, subtitles: makeSubtitles,
-                                                     dubbing: makeDubbing) { phase in
+                                                     dubbing: makeDubbing, burnIn: makeBurnIn) { phase in
                         Task { @MainActor in self.status = phase }
                     }
                 }

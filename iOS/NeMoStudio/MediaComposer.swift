@@ -1,11 +1,13 @@
 import AVFoundation
 import Foundation
+import QuartzCore
+import UIKit
 
 enum MediaComposerError: LocalizedError {
     case unsupported
 
     var errorDescription: String? {
-        "Il video non può essere esportato in MOV con i codec disponibili su questo iPhone. La traccia WAV rimane nella cartella Output."
+        "Contenitore o codec video non esportabile con le API iOS su questo dispositivo."
     }
 }
 
@@ -53,5 +55,67 @@ enum MediaComposer {
             throw MediaComposerError.unsupported
         }
         try await exporter.export(to: output, as: .mov)
+    }
+
+    static func burnSubtitles(video: URL, lines: [StudioLine], output: URL) async throws {
+        let asset = AVURLAsset(url: video)
+        guard !(try await asset.loadTracks(withMediaType: .video)).isEmpty,
+              let exporter = AVAssetExportSession(asset: asset,
+                                                   presetName: AVAssetExportPresetHighestQuality) else {
+            throw MediaComposerError.unsupported
+        }
+        let duration = try await asset.load(.duration)
+        let seconds = CMTimeGetSeconds(duration)
+        guard seconds > 0, seconds.isFinite else { throw MediaComposerError.unsupported }
+        let composition = AVMutableVideoComposition(propertiesOf: asset)
+        let size = composition.renderSize
+        let parent = CALayer()
+        let picture = CALayer()
+        parent.frame = CGRect(origin: .zero, size: size)
+        picture.frame = parent.bounds
+        parent.addSublayer(picture)
+        let colors: [UIColor] = [
+            UIColor(red: 0.345, green: 0.651, blue: 1, alpha: 1),
+            UIColor(red: 1, green: 0.482, blue: 0.447, alpha: 1),
+            UIColor(red: 0.824, green: 0.659, blue: 1, alpha: 1),
+            UIColor(red: 0.247, green: 0.725, blue: 0.314, alpha: 1)
+        ]
+        for line in lines where line.start < seconds {
+            let caption = CATextLayer()
+            caption.string = line.text
+            caption.fontSize = max(22, size.height * 0.045)
+            caption.contentsScale = 2
+            caption.isWrapped = true
+            caption.alignmentMode = .center
+            caption.foregroundColor = colors[max(0, min(3, line.speaker - 1))].cgColor
+            caption.backgroundColor = UIColor.black.withAlphaComponent(0.68).cgColor
+            caption.cornerRadius = 12
+            caption.shadowColor = UIColor.black.cgColor
+            caption.shadowOpacity = 1
+            caption.shadowRadius = 4
+            caption.frame = CGRect(x: size.width * 0.08, y: size.height * 0.075,
+                                   width: size.width * 0.84, height: size.height * 0.18)
+            caption.opacity = 0
+            let start = max(0, min(1, line.start / seconds))
+            let end = max(start, min(1, line.end / seconds))
+            let visible = CAKeyframeAnimation(keyPath: "opacity")
+            visible.keyTimes = [0, NSNumber(value: start), NSNumber(value: start),
+                                NSNumber(value: end), NSNumber(value: end), 1]
+            visible.values = [0, 0, 1, 1, 0, 0]
+            visible.calculationMode = .discrete
+            visible.duration = seconds
+            visible.beginTime = AVCoreAnimationBeginTimeAtZero
+            visible.isRemovedOnCompletion = false
+            visible.fillMode = .both
+            caption.add(visible, forKey: "captionVisible")
+            parent.addSublayer(caption)
+        }
+        composition.animationTool = AVVideoCompositionCoreAnimationTool(
+            postProcessingAsVideoLayer: picture, in: parent)
+        exporter.videoComposition = composition
+        guard exporter.supportedFileTypes.contains(.mp4) else {
+            throw MediaComposerError.unsupported
+        }
+        try await exporter.export(to: output, as: .mp4)
     }
 }
