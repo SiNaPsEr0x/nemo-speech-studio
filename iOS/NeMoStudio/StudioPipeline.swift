@@ -24,12 +24,14 @@ enum StudioPipelineError: LocalizedError {
     case noAudio
     case noWords
     case unsupportedFormat
+    case translationRequired
 
     var errorDescription: String? {
         switch self {
         case .noAudio: return "Il file non contiene una traccia audio utilizzabile."
         case .noWords: return "Nemotron non ha riconosciuto parole nel file."
         case .unsupportedFormat: return "Questo formato video non è decodificabile da iOS."
+        case .translationRequired: return "Per questo video scegli una lingua di destinazione diversa dall'originale."
         }
     }
 }
@@ -44,6 +46,8 @@ enum StudioPipeline {
         softSubtitles: Bool,
         dubbing: Bool,
         burnIn: Bool,
+        burnTranslated: Bool,
+        dubbedOnly: Bool,
         strictExports: Bool,
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> StudioResult {
@@ -129,6 +133,9 @@ enum StudioPipeline {
                 }
             }
         }
+        if (burnTranslated || dubbedOnly) && translated.isEmpty {
+            throw StudioPipelineError.translationRequired
+        }
         let directory = AppStoragePaths.output.appendingPathComponent(
             "\(source.deletingPathExtension().lastPathComponent)-\(UUID().uuidString.prefix(8))",
             isDirectory: true)
@@ -169,13 +176,20 @@ enum StudioPipeline {
             SessionLog.shared.write("Dubbing WAV exported bytes=\((try? dubbedWAV.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)", always: true)
             if try await MediaComposer.hasVideo(source) {
                 try Task.checkCancellation()
-                progress("Creo MOV con audio originale + doppiaggio separato")
-                let video = directory.appendingPathComponent("video-doppiato.mov")
+                progress(dubbedOnly ? "Creo MP4 con solo audio tradotto" : "Creo MOV con audio originale + doppiaggio separato")
+                let video = directory.appendingPathComponent(dubbedOnly
+                    ? "video-tradotto-senza-sottotitoli.mp4" : "video-doppiato.mov")
                 do {
-                    try await MediaComposer.muxOriginalAndDubbing(
-                        video: source, dubbing: dubbedWAV, output: video)
+                    if dubbedOnly {
+                        try await MediaComposer.muxTranslatedOnly(
+                            video: source, dubbing: dubbedWAV, output: video)
+                    } else {
+                        try await MediaComposer.muxOriginalAndDubbing(
+                            video: source, dubbing: dubbedWAV, output: video)
+                    }
                     files.append(video)
-                    SessionLog.shared.write("MOV with separate original/dub audio exported", always: true)
+                    SessionLog.shared.write(dubbedOnly ? "MP4 with translated audio only exported"
+                                                     : "MOV with separate original/dub audio exported", always: true)
                 } catch is CancellationError {
                     try? FileManager.default.removeItem(at: video)
                     throw CancellationError()
@@ -191,10 +205,11 @@ enum StudioPipeline {
         if burnIn {
             try Task.checkCancellation()
             progress("Imprimo i sottotitoli nel video MP4")
-            let video = directory.appendingPathComponent("video-sottotitolato.mp4")
+            let video = directory.appendingPathComponent(burnTranslated
+                ? "video-sottotitoli-tradotti.mp4" : "video-sottotitoli-originali.mp4")
             do {
                 try await MediaComposer.burnSubtitles(
-                    video: source, lines: translated.isEmpty ? lines : translated,
+                    video: source, lines: burnTranslated ? translated : lines,
                     output: video)
                 files.append(video)
                 SessionLog.shared.write("Burn-in MP4 exported", always: true)
