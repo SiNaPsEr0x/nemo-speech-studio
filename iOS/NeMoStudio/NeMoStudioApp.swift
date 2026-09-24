@@ -14,7 +14,7 @@ final class StudioAppDelegate: NSObject, UIApplicationDelegate {
 }
 
 // A single, per-process session log: truncate before anything else writes to it.
-final class SessionLog {
+final class SessionLog: @unchecked Sendable {
     static let shared = SessionLog()
     let url: URL
     private let queue = DispatchQueue(label: "NeMoStudio.sessionLog")
@@ -129,10 +129,13 @@ struct StudioView: View {
     @State private var info: String?
     @State private var debugEnabled = UserDefaults.standard.bool(forKey: "debugEnabled")
     @State private var language = "it-IT"
+    @State private var translate = false
+    @State private var targetLanguage = "en"
     @State private var diarization = true
     @State private var working = false
     @State private var status = ""
     @State private var lines: [StudioLine] = []
+    @State private var translated: [StudioLine] = []
     @State private var files: [URL] = []
     @State private var job: Task<Void, Never>?
     @State private var voiceText = ""
@@ -269,16 +272,29 @@ struct StudioView: View {
             .tint(StudioStyle.accent)
             Toggle("Riconosci i parlanti con Sortformer", isOn: $diarization)
                 .tint(StudioStyle.accent).font(.subheadline)
+            Toggle("Traduci in locale con Riva 4B", isOn: $translate)
+                .tint(StudioStyle.accent).font(.subheadline)
+            if translate {
+                Picker("Lingua di destinazione", selection: $targetLanguage) {
+                    Text("Inglese").tag("en")
+                    Text("Italiano").tag("it")
+                    Text("Francese").tag("fr")
+                    Text("Tedesco").tag("de")
+                    Text("Spagnolo").tag("es")
+                }
+                Text("Riva supporta queste lingue tramite l’inglese; scegli una lingua originale esplicita per la traduzione.")
+                    .font(.caption2).foregroundStyle(StudioStyle.muted)
+            }
             HStack(spacing: 9) {
                 feature("Trascrivi", "text.quote")
                 feature("Parlanti", "person.2.wave.2")
                 feature("Traduci", "character.book.closed")
             }
-            Text(mode.available ? "Nemotron 3.5 e Sortformer elaborano sul dispositivo. I modelli vanno scaricati una sola volta." : "Questo preset richiede ancora traduzione Riva e/o produzione video iOS: non produce risultati simulati.")
+            Text(mode.available ? "Nemotron 3.5, Sortformer e Riva elaborano sul dispositivo. I modelli vanno scaricati una sola volta." : "Questo preset richiede ancora produzione video iOS: non produce risultati simulati.")
                 .font(.caption).foregroundStyle(StudioStyle.muted)
             Button(working ? "Elaborazione in corso" : "Avvia elaborazione") { start() }
                 .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
-                .disabled(working || !library.ready || selectedFile == nil || !mode.available)
+                .disabled(working || !library.ready || selectedFile == nil || !mode.available || (translate && language == "auto"))
                 .frame(maxWidth: .infinity)
             if working { Button("Stop elaborazione") { job?.cancel() }.foregroundStyle(.orange) }
             if !status.isEmpty { Text(status).font(.caption).foregroundStyle(StudioStyle.accent) }
@@ -289,8 +305,8 @@ struct StudioView: View {
         HStack(alignment: .top, spacing: 13) {
             Image(systemName: "cpu").foregroundStyle(StudioStyle.accent)
             VStack(alignment: .leading, spacing: 6) {
-                Text("Nemotron 3.5 + Sortformer + Magpie").font(.subheadline.bold())
-                Text("Modelli NVIDIA convertiti per Core ML / MLX: stessi modelli di origine, runtime diverso. La traduzione Riva e il mux video non sono ancora disponibili.")
+                Text("Nemotron 3.5 + Sortformer + Riva + Magpie").font(.subheadline.bold())
+                Text("Modelli NVIDIA sul dispositivo: ASR Core ML, Riva GGUF/Metal e TTS MLX. Il mux video non è ancora disponibile.")
                     .font(.caption).foregroundStyle(StudioStyle.muted)
             }
             if !lines.isEmpty {
@@ -303,6 +319,15 @@ struct StudioView: View {
                     ForEach(files, id: \.self) { file in
                         ShareLink(item: file) { Label(file.lastPathComponent, systemImage: "square.and.arrow.up") }
                             .font(.caption).foregroundStyle(StudioStyle.accent)
+                    }
+                }
+            }
+            if !translated.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Traduzione Riva").font(.headline)
+                    ForEach(translated) { line in
+                        Text("\(line.speaker > 0 ? "Speaker \(line.speaker) · " : "")\(line.text)")
+                            .font(.caption).foregroundStyle(.white.opacity(0.9))
                     }
                 }
             }
@@ -332,14 +357,17 @@ struct StudioView: View {
         working = true
         files = []
         lines = []
+        translated = []
         status = "Avvio modello locale..."
         let selectedLanguage = language
+        let selectedTarget = translate && targetLanguage != String(language.prefix(2)) ? targetLanguage : nil
         let useDiarization = diarization
         let makeSubtitles = mode == .subtitles
         job = Task {
             do {
                 let worker = Task.detached(priority: .userInitiated) {
                     try await StudioPipeline.process(source: selectedFile, language: selectedLanguage,
+                                                     targetLanguage: selectedTarget,
                                                      diarization: useDiarization, subtitles: makeSubtitles) { phase in
                         Task { @MainActor in self.status = phase }
                     }
@@ -348,6 +376,7 @@ struct StudioView: View {
                     try await worker.value
                 }, onCancel: { worker.cancel() })
                 lines = result.lines
+                translated = result.translated
                 files = result.files
                 status = "Completato: \(result.files.count) file pronti"
             } catch is CancellationError {

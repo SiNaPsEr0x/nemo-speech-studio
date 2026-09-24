@@ -33,7 +33,23 @@ jobs:
       - name: Compile for iPhone (unsigned, no release)
         working-directory: iOS
         run: |
+          version="$(date -u +%G.%V.%u)"
           xcodebuild -project NeMoStudio.xcodeproj -scheme NeMoStudio \
             -destination 'generic/platform=iOS' -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/nemo-derived" \
             -skipPackagePluginValidation -skipMacroValidation \
+            MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGNING_ALLOWED=NO build
+      - name: Package unsigned IPA for testing
+        run: |
+          mkdir -p "$RUNNER_TEMP/nemo-ipa/Payload"
+          ditto "$RUNNER_TEMP/nemo-derived/Build/Products/Release-iphoneos/NeMoStudio.app" \
+            "$RUNNER_TEMP/nemo-ipa/Payload/NeMoStudio.app"
+          cd "$RUNNER_TEMP/nemo-ipa"
+          ditto -c -k --keepParent Payload "$RUNNER_TEMP/NeMoStudio-unsigned.ipa"
+      - name: Upload test IPA (not a GitHub Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeMoStudio-unsigned-${{ github.run_number }}
+          path: ${{ runner.temp }}/NeMoStudio-unsigned.ipa
+          retention-days: 14

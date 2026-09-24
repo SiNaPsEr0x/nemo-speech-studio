@@ -5,7 +5,7 @@ import MagpieTTS
 import NemotronStreamingASR
 import SpeechVAD
 
-struct StudioLine: Codable, Identifiable {
+struct StudioLine: Codable, Identifiable, Sendable {
     var id: Int
     var start: Double
     var end: Double
@@ -13,8 +13,9 @@ struct StudioLine: Codable, Identifiable {
     var text: String
 }
 
-struct StudioResult {
+struct StudioResult: Sendable {
     var lines: [StudioLine]
+    var translated: [StudioLine]
     var files: [URL]
 }
 
@@ -36,9 +37,10 @@ enum StudioPipeline {
     static func process(
         source: URL,
         language: String,
+        targetLanguage: String?,
         diarization: Bool,
         subtitles: Bool,
-        progress: @escaping (String) -> Void
+        progress: @escaping @Sendable (String) -> Void
     ) async throws -> StudioResult {
         progress("Preparo la traccia audio")
         let audio = try await prepareAudio(source)
@@ -82,6 +84,18 @@ enum StudioPipeline {
         }
 
         let lines = makeLines(words: timedWords, speakers: speakers)
+        var translated: [StudioLine] = []
+        if let targetLanguage, !lines.isEmpty {
+            progress("Carico Riva Translate 4B (Metal)")
+            let translator = try RivaTranslator(url: ModelLibrary.rivaPath)
+            for (index, line) in lines.enumerated() {
+                try Task.checkCancellation()
+                progress("Traduco con Riva: \(index + 1)/\(lines.count)")
+                var output = line
+                output.text = try translator.translate(line.text, from: language, to: targetLanguage)
+                translated.append(output)
+            }
+        }
         let directory = AppStoragePaths.output.appendingPathComponent(
             "\(source.deletingPathExtension().lastPathComponent)-\(UUID().uuidString.prefix(8))",
             isDirectory: true)
@@ -90,8 +104,12 @@ enum StudioPipeline {
         if subtitles {
             files += try writeSubtitles(lines, to: directory)
         }
+        if !translated.isEmpty {
+            files += try writeTranscripts(translated, to: directory, suffix: "-tradotta")
+            if subtitles { files += try writeSubtitles(translated, to: directory, suffix: "-tradotti") }
+        }
         progress("Pronto")
-        return StudioResult(lines: lines, files: files)
+        return StudioResult(lines: lines, translated: translated, files: files)
     }
 
     static func synthesize(_ text: String, voice: String, language: String) async throws -> URL {
@@ -114,22 +132,12 @@ enum StudioPipeline {
             return url
         }
         let asset = AVURLAsset(url: url)
-        guard !asset.tracks(withMediaType: .audio).isEmpty else { throw StudioPipelineError.noAudio }
+        guard !((try await asset.loadTracks(withMediaType: .audio)).isEmpty) else { throw StudioPipelineError.noAudio }
         guard let exporter = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
             throw StudioPipelineError.unsupportedFormat
         }
         let target = AppStoragePaths.temporary.appendingPathComponent("audio-\(UUID().uuidString).m4a")
-        exporter.outputURL = target
-        exporter.outputFileType = .m4a
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            exporter.exportAsynchronously {
-                if exporter.status == .completed {
-                    continuation.resume()
-                } else {
-                    continuation.resume(throwing: exporter.error ?? StudioPipelineError.unsupportedFormat)
-                }
-            }
-        }
+        try await exporter.export(to: target, as: .m4a)
         return target
     }
 
@@ -161,19 +169,21 @@ enum StudioPipeline {
         max(0, min(Double(segment.endTime), end) - max(Double(segment.startTime), start))
     }
 
-    private static func writeTranscripts(_ lines: [StudioLine], to directory: URL) throws -> [URL] {
-        let txt = directory.appendingPathComponent("trascrizione.txt")
-        let json = directory.appendingPathComponent("trascrizione.json")
+    private static func writeTranscripts(_ lines: [StudioLine], to directory: URL,
+                                         suffix: String = "") throws -> [URL] {
+        let txt = directory.appendingPathComponent("trascrizione\(suffix).txt")
+        let json = directory.appendingPathComponent("trascrizione\(suffix).json")
         try lines.map { "[\(stamp($0.start, separator: ":"))] \($0.speaker > 0 ? "Speaker \($0.speaker): " : "")\($0.text)" }
             .joined(separator: "\n").write(to: txt, atomically: true, encoding: .utf8)
         try JSONEncoder().encode(lines).write(to: json, options: .atomic)
         return [txt, json]
     }
 
-    private static func writeSubtitles(_ lines: [StudioLine], to directory: URL) throws -> [URL] {
-        let srt = directory.appendingPathComponent("sottotitoli.srt")
-        let vtt = directory.appendingPathComponent("sottotitoli.vtt")
-        let ass = directory.appendingPathComponent("sottotitoli.ass")
+    private static func writeSubtitles(_ lines: [StudioLine], to directory: URL,
+                                       suffix: String = "") throws -> [URL] {
+        let srt = directory.appendingPathComponent("sottotitoli\(suffix).srt")
+        let vtt = directory.appendingPathComponent("sottotitoli\(suffix).vtt")
+        let ass = directory.appendingPathComponent("sottotitoli\(suffix).ass")
         let captions = lines.map { line in
             "\(line.id)\n\(stamp(line.start, separator: ",")) --> \(stamp(line.end, separator: ","))\n\(line.text)"
         }.joined(separator: "\n\n")

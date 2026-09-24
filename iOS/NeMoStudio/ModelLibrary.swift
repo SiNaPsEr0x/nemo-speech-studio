@@ -101,7 +101,15 @@ final class ModelLibrary: ObservableObject {
             request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
             let (tempURL, response) = try await URLSession.shared.download(for: request)
             guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-            if http.statusCode == 200 {
+            if http.statusCode == 416,
+               let range = http.value(forHTTPHeaderField: "Content-Range"),
+               range.hasPrefix("bytes */"),
+               Int64(range.dropFirst("bytes */".count)) == offset {
+                // The previous launch wrote the final block, but was stopped before
+                // it could hash and promote the .part file.
+                total = offset
+                try? FileManager.default.removeItem(at: tempURL)
+            } else if http.statusCode == 200 {
                 if FileManager.default.fileExists(atPath: part.path) { try FileManager.default.removeItem(at: part) }
                 try FileManager.default.moveItem(at: tempURL, to: part)
                 total = (try part.resourceValues(forKeys: [.fileSizeKey])).fileSize.map(Int64.init)
@@ -112,7 +120,7 @@ final class ModelLibrary: ObservableObject {
                     throw URLError(.cannotParseResponse)
                 }
                 let fields = String(range[match]).split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "/" })
-                guard fields.count == 4, Int64(fields[1]) == offset,
+                guard fields.count == 4, let startByte = Int64(fields[1]), startByte == offset,
                       let endByte = Int64(fields[2]), let size = Int64(fields[3]), endByte < size else {
                     throw URLError(.cannotParseResponse)
                 }
@@ -134,6 +142,7 @@ final class ModelLibrary: ObservableObject {
                 }
                 offset = (try part.resourceValues(forKeys: [.fileSizeKey])).fileSize.map(Int64.init) ?? 0
                 guard offset == endByte + 1 else { throw URLError(.cannotParseResponse) }
+                guard offset > startByte else { throw URLError(.cannotParseResponse) }
                 total = size
             } else {
                 throw URLError(.badServerResponse)
