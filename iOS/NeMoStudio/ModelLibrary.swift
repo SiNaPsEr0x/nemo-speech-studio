@@ -18,6 +18,12 @@ enum ModelStorageError: LocalizedError {
     }
 }
 
+struct ModelPresence: Identifiable {
+    let id: String
+    let name: String
+    let installed: Bool
+}
+
 // The explicit user action that fills persistent storage. Inference uses local bundles only.
 @MainActor
 final class ModelLibrary: ObservableObject {
@@ -25,22 +31,12 @@ final class ModelLibrary: ObservableObject {
     @Published private(set) var ready = false
     @Published private(set) var status = "Modelli non ancora verificati"
     @Published private(set) var fraction = 0.0
+    @Published private(set) var models: [ModelPresence] = []
     private var work: Task<Void, Never>?
     private var lastProgressBucket = -1
 
     init() {
-        Task {
-            let asr = try? Self.modelDirectory(NemotronStreamingASRModel.defaultModelId)
-            let sort = try? Self.modelDirectory(SortformerDiarizer.defaultModelId)
-            let magpie = try? Self.modelDirectory(MagpieTTSVariant.int8.huggingFaceRepoId)
-            ready = [Self.verifiedMarker,
-                     asr?.appendingPathComponent("encoder.mlmodelc"),
-                     sort?.appendingPathComponent("Sortformer.mlmodelc"),
-                     magpie?.appendingPathComponent("nanocodec_decoder/model.safetensors"),
-                     Self.rivaPath].allSatisfy { $0.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
-            status = ready ? "Modelli in cache · verifica integrità al download" : "Scarica i modelli per iniziare"
-            SessionLog.shared.write("Cache check ready=\(ready) ASR=\(asr != nil) Sortformer=\(sort != nil) Magpie=\(magpie != nil) Riva=\(FileManager.default.fileExists(atPath: Self.rivaPath.path))", always: true)
-        }
+        refreshPresence()
     }
 
     nonisolated static let rivaFile = "Riva-Translate-4B-Instruct-v2-Q4_K_M.gguf"
@@ -48,6 +44,28 @@ final class ModelLibrary: ObservableObject {
     static let rivaURL = URL(string: "https://huggingface.co/liodon-ai/Riva-Translate-4B-Instruct-v2-imatrix-GGUF/resolve/main/Riva-Translate-4B-Instruct-v2-Q4_K_M.gguf?download=true")!
     nonisolated static let rivaPath = AppStoragePaths.models.appendingPathComponent(rivaFile)
     static let verifiedMarker = AppStoragePaths.models.appendingPathComponent("models-verified-v1.txt")
+
+    private func refreshPresence() {
+        let asr = try? Self.modelDirectory(NemotronStreamingASRModel.defaultModelId)
+        let sort = try? Self.modelDirectory(SortformerDiarizer.defaultModelId)
+        let magpie = try? Self.modelDirectory(MagpieTTSVariant.int8.huggingFaceRepoId)
+        let files: [(String, String, URL?)] = [
+            ("nemotron", "Nemotron 3.5", asr?.appendingPathComponent("encoder.mlmodelc")),
+            ("sortformer", "Sortformer", sort?.appendingPathComponent("Sortformer.mlmodelc")),
+            ("magpie", "Magpie", magpie?.appendingPathComponent("nanocodec_decoder/model.safetensors")),
+            ("riva", "Riva 4B", Self.rivaPath)
+        ]
+        models = files.map { id, name, file in
+            ModelPresence(id: id, name: name,
+                          installed: file.map { FileManager.default.fileExists(atPath: $0.path) } ?? false)
+        }
+        ready = FileManager.default.fileExists(atPath: Self.verifiedMarker.path)
+            && models.allSatisfy(\.installed)
+        if !downloading {
+            status = ready ? "Tutti i modelli sono già sul tuo iPhone" : "Scarica i modelli mancanti per iniziare"
+        }
+        SessionLog.shared.write("Cache models: \(models.map { "\($0.name)=\($0.installed)" }.joined(separator: ", ")); verified=\(ready)")
+    }
 
     private static func ensureSpace(_ minimum: Int64) throws {
         let values = try AppStoragePaths.models.resourceValues(
@@ -94,6 +112,7 @@ final class ModelLibrary: ObservableObject {
                                       "vocab.json", "tokenizer.model", "*_tokenizer.model",
                                       "vocab.txt", "languages.json", "config.json"],
                     progressHandler: reportProgress(base: 0, weight: 0.25, model: "Nemotron"))
+                refreshPresence()
                 SessionLog.shared.write("ASR download verified")
                 try Task.checkCancellation()
                 status = "Sortformer: download/resume + verifica SHA"
@@ -104,21 +123,24 @@ final class ModelLibrary: ObservableObject {
                     modelId: sortID, to: sortPath,
                     additionalFiles: ["Sortformer.mlmodelc/**", "config.json"],
                     progressHandler: reportProgress(base: 0.25, weight: 0.25, model: "Sortformer"))
+                refreshPresence()
                 SessionLog.shared.write("Sortformer download verified")
                 try Task.checkCancellation()
                 status = "Magpie + NanoCodec: download/resume + verifica SHA"
                 lastProgressBucket = -1
                 _ = try await MagpieTTSDownloader.ensureDownloaded(
                     variant: .int8, progressHandler: reportProgress(base: 0.50, weight: 0.25, model: "Magpie"))
+                refreshPresence()
                 SessionLog.shared.write("Magpie/NanoCodec download verified")
                 try Task.checkCancellation()
                 status = "Riva Translate Q4_K_M: download/resume + SHA-256"
                 lastProgressBucket = -1
                 try await Self.downloadRiva(progress: reportProgress(base: 0.75, weight: 0.25, model: "Riva"))
+                refreshPresence()
                 try ("Riva SHA-256: " + Self.rivaHash).write(
                     to: Self.verifiedMarker, atomically: true, encoding: .utf8)
                 fraction = 1
-                ready = true
+                refreshPresence()
                 status = "Modelli pronti sul dispositivo"
                 SessionLog.shared.write("Download modelli completato", always: true)
             } catch is CancellationError {

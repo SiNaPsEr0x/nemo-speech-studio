@@ -314,30 +314,61 @@ struct StudioView: View {
             HStack {
                 Label("Modelli", systemImage: "square.stack.3d.up.fill").font(.headline)
                 Spacer()
-                Text(library.ready ? "PRONTI" : library.downloading ? "DOWNLOAD" : "DA SCARICARE")
+                Text(library.downloading ? "DOWNLOAD" : library.ready ? "PRONTI" : "DA COMPLETARE")
                     .font(.caption2.bold()).foregroundStyle(library.ready ? StudioStyle.accent : StudioStyle.muted)
             }
             Text(library.status).font(.subheadline).foregroundStyle(StudioStyle.muted)
+            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading),
+                                GridItem(.flexible(), alignment: .leading)],
+                      alignment: .leading, spacing: 10) {
+                ForEach(library.models) { model in
+                    HStack(spacing: 6) {
+                        Image(systemName: model.installed ? "checkmark.circle.fill" : "circle.dashed")
+                            .foregroundStyle(model.installed ? StudioStyle.accent : StudioStyle.muted)
+                        Text(model.name).foregroundStyle(model.installed ? .white : StudioStyle.muted)
+                            .lineLimit(1).minimumScaleFactor(0.8)
+                    }
+                    .font(.caption)
+                    .accessibilityLabel("\(model.name): \(model.installed ? "sul dispositivo" : "da scaricare")")
+                }
+            }
+            .padding(13)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 14))
             if library.downloading {
                 ProgressView(value: library.fraction).tint(StudioStyle.accent)
                 Text("\(Int(library.fraction * 100))% · puoi fermarti e riprendere")
                     .font(.caption).foregroundStyle(StudioStyle.muted)
             }
-            HStack(spacing: 10) {
-                Button(library.ready ? "Verifica / aggiorna" : "Scarica / riprendi") {
-                    library.downloadAll()
+            if library.ready && !library.downloading {
+                HStack {
+                    Label("Tutto pronto", systemImage: "checkmark.seal.fill")
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(StudioStyle.accent)
+                    Spacer()
+                    Menu {
+                        Button("Verifica / ripara modelli", systemImage: "arrow.clockwise") {
+                            library.downloadAll()
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.title3).foregroundStyle(StudioStyle.muted)
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .accessibilityLabel("Opzioni modelli")
                 }
-                .frame(maxWidth: .infinity)
-                .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
-                .disabled(library.downloading)
-                if library.downloading {
-                    Button("Ferma") { library.stop() }
-                        .buttonStyle(.bordered).tint(StudioStyle.accent)
+            } else {
+                HStack(spacing: 10) {
+                    Button("Scarica / riprendi") { library.downloadAll() }
+                        .frame(maxWidth: .infinity)
+                        .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+                        .disabled(library.downloading)
+                    if library.downloading {
+                        Button("Ferma") { library.stop() }
+                            .buttonStyle(.bordered).tint(StudioStyle.accent)
+                    }
                 }
+                .controlSize(.large)
             }
-            .controlSize(.large)
-            Text("Nemotron 3.5 · Sortformer · Magpie · Riva 4B")
-                .font(.caption).foregroundStyle(StudioStyle.muted)
         }.card()
     }
 
