@@ -38,6 +38,12 @@ enum StudioPipelineError: LocalizedError {
 }
 
 enum StudioPipeline {
+    // speech-swift's Magpie defaults. Greedy decoding (0/1) is known to
+    // stall for Italian; keep preview and dubbing on the same sampling policy.
+    private static func magpieSamplingParams() -> MagpieTTSParams {
+        MagpieTTSParams(temperature: 0.6, topK: 80, maxSteps: 500)
+    }
+
     static func process(
         source: URL,
         language: String,
@@ -273,7 +279,7 @@ enum StudioPipeline {
         }
         let samples = try model.synthesize(
             text: text, speaker: selectedVoice, language: selectedLanguage,
-            params: MagpieTTSParams(temperature: 0, topK: 1, maxSteps: 500))
+            params: magpieSamplingParams())
         let url = AppStoragePaths.output.appendingPathComponent("magpie-\(UUID().uuidString.prefix(8)).wav")
         try writeWAV(samples, at: url, sampleRate: Double(MagpieTTS.sampleRate))
         SessionLog.shared.write("Magpie synthesized samples=\(samples.count)")
@@ -349,7 +355,7 @@ enum StudioPipeline {
                 let generated = try autoreleasepool {
                     try model.synthesize(
                         text: part, speaker: voice, language: speechLanguage,
-                        params: MagpieTTSParams(temperature: 0, topK: 1, maxSteps: 500))
+                        params: magpieSamplingParams())
                 }
                 samples.append(contentsOf: generated)
                 Memory.clearCache()
