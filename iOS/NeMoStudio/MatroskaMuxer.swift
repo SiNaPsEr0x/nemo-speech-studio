@@ -77,8 +77,8 @@ enum MatroskaMuxer {
         try file.write(contentsOf: info)
         try file.write(contentsOf: element([0x16, 0x54, 0xAE, 0x6B], entries))
 
-        var videoSample = videoOutput.copyNextSampleBuffer()
-        var audioSample = audioOutput.copyNextSampleBuffer()
+        var videoSample = nextPayloadSample(videoOutput)
+        var audioSample = nextPayloadSample(audioOutput)
         var originalIndex = 0
         var translatedIndex = 0
         var clusterTime = -1
@@ -106,13 +106,13 @@ enum MatroskaMuxer {
                 try file.write(contentsOf: element([0xA3], try block(sample: sample, track: 1,
                                                                       relative: current - clusterTime,
                                                                       keyframe: keyframe)))
-                videoSample = videoOutput.copyNextSampleBuffer()
+                videoSample = nextPayloadSample(videoOutput)
             } else if nextAudio <= nextOriginal && nextAudio <= nextTranslated,
                       let sample = audioSample {
                 try file.write(contentsOf: element([0xA3], try block(sample: sample, track: 2,
                                                                       relative: current - clusterTime,
                                                                       keyframe: true)))
-                audioSample = audioOutput.copyNextSampleBuffer()
+                audioSample = nextPayloadSample(audioOutput)
             } else {
                 let translatedCue = nextTranslated < nextOriginal
                 let line = translatedCue ? translated[translatedIndex] : captions[originalIndex]
@@ -168,6 +168,14 @@ enum MatroskaMuxer {
                                               element([0x9F], unsigned(UInt64(audio.1)))))
         }
         return element([0xAE], value)
+    }
+
+    // AVAssetReader may emit zero-sample format/discontinuity markers before encoded frames.
+    private static func nextPayloadSample(_ output: AVAssetReaderTrackOutput) -> CMSampleBuffer? {
+        while let sample = output.copyNextSampleBuffer() {
+            if CMSampleBufferGetNumSamples(sample) > 0 { return sample }
+        }
+        return nil
     }
 
     private static func timestamp(_ sample: CMSampleBuffer) -> Int {
