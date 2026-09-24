@@ -73,7 +73,7 @@ final class ModelLibrary: ObservableObject {
 
     var memoryGB: Int { Int(ProcessInfo.processInfo.physicalMemory / 1_073_741_824) }
     var recommendedRiva: RivaQuality {
-        if memoryGB >= 12 { return .q6 }
+        if memoryGB >= 10 { return .q6 }
         if memoryGB >= 8 { return .q5 }
         return .q4
     }
@@ -218,8 +218,8 @@ final class ModelLibrary: ObservableObject {
                 }
                 fraction = 1
                 refreshPresence()
-                status = "Modelli pronti sul dispositivo"
-                SessionLog.shared.write("Download modelli completato", always: true)
+                status = ready ? "Modelli pronti sul dispositivo" : "Scarica i modelli mancanti per iniziare"
+                SessionLog.shared.write("Download modelli completato ready=\(ready)", always: true)
             } catch is CancellationError {
                 status = "Download sospeso: riprende dal pulsante"
                 SessionLog.shared.write("Model download cancelled at \(Int(fraction * 100))%", always: true)
