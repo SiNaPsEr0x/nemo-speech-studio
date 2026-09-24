@@ -240,6 +240,8 @@ struct StudioView: View {
     @State private var working = false
     @State private var status = ""
     @State private var activeStages: [String] = []
+    @State private var jobStartedAt = Date()
+    @State private var estimatedFinish: Date?
     @State private var lines: [StudioLine] = []
     @State private var translated: [StudioLine] = []
     @State private var files: [URL] = []
@@ -351,13 +353,21 @@ struct StudioView: View {
                 .font(.subheadline)
                 .foregroundStyle(StudioStyle.accent)
                 .lineLimit(2)
-            ProgressView(value: Double(current), total: Double(max(1, activeStages.count)))
+            ProgressView(value: progressFraction(for: status))
                 .tint(StudioStyle.accent)
-                .accessibilityLabel("Fasi completate")
-            Text("Fasi completate: \(current) su \(activeStages.count). Il tempo di questa fase dipende dalla durata del file.")
-                .font(.caption)
-                .foregroundStyle(StudioStyle.muted)
-                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel("Avanzamento stimato dell'elaborazione")
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                if let estimatedFinish, estimatedFinish > context.date {
+                    let seconds = Int(ceil(estimatedFinish.timeIntervalSince(context.date)))
+                    Text("Tempo rimanente stimato: \(seconds >= 60 ? "\(seconds / 60) min \(seconds % 60) s" : "\(seconds) s")")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(StudioStyle.muted)
+                } else {
+                    Text("Calcolo il tempo rimanente dai progressi reali…")
+                        .font(.caption)
+                        .foregroundStyle(StudioStyle.muted)
+                }
+            }
             Button("Ferma elaborazione", role: .cancel) { job?.cancel() }
                 .font(.subheadline)
                 .foregroundStyle(.orange)
@@ -375,9 +385,69 @@ struct StudioView: View {
         else if phase.hasPrefix("Carico Sortformer") || phase.hasPrefix("Riconosco i parlanti") { stage = "Parlanti" }
         else if phase.hasPrefix("Carico Riva") || phase.hasPrefix("Traduco") { stage = "Traduzione" }
         else if phase.hasPrefix("Preparo il doppiaggio") || phase.hasPrefix("Sintetizzo")
+                    || phase.hasPrefix("Voce sintetizzata")
                     || phase.hasPrefix("Creo ") || phase.hasPrefix("Imprimo") { stage = "Esportazione" }
         else { stage = "Preparazione" }
         return activeStages.firstIndex(of: stage) ?? 0
+    }
+
+    private func progressFraction(for phase: String) -> Double {
+        let outputWeight: Double = (mode == .dubbing || mode == .complete || mode == .translatedVideo) ? 12 : 4
+        let weights = activeStages.map { stage -> Double in
+            switch stage {
+            case "Preparazione": return 1
+            case "Trascrizione": return 6
+            case "Parlanti": return 5
+            case "Traduzione": return 4
+            default: return outputWeight
+            }
+        }
+        let index = stageIndex(for: phase)
+        let completed = weights.prefix(index).reduce(0, +)
+        let currentFraction: Double
+        if phase.hasPrefix("Traduco con Riva: "), let ratio = countRatio(in: phase, after: "Traduco con Riva: ") {
+            currentFraction = max(0, ratio - 1 / Double(max(1, countTotal(in: phase, after: "Traduco con Riva: "))))
+        } else if phase.hasPrefix("Sintetizzo la voce: "), let ratio = countRatio(in: phase, after: "Sintetizzo la voce: ") {
+            let total = Double(max(1, countTotal(in: phase, after: "Sintetizzo la voce: ")))
+            let parts = countRatio(in: phase, after: " · parte ") ?? 0
+            let partTotal = Double(max(1, countTotal(in: phase, after: " · parte ")))
+            currentFraction = max(0, ratio - 1 / total) + parts / (total * partTotal)
+        } else if phase.hasPrefix("Voce sintetizzata: "), let ratio = countRatio(in: phase, after: "Voce sintetizzata: ") {
+            currentFraction = ratio
+        } else if phase.hasPrefix("Trascrivo sul dispositivo: "), let ratio = countRatio(in: phase, after: "Trascrivo sul dispositivo: ") {
+            currentFraction = ratio
+        } else if phase.hasPrefix("Riconosco i parlanti: "), let ratio = countRatio(in: phase, after: "Riconosco i parlanti: ") {
+            currentFraction = ratio
+        } else if phase.hasPrefix("Creo ") || phase.hasPrefix("Imprimo") {
+            currentFraction = 0.85
+        } else {
+            currentFraction = 0
+        }
+        let total = max(1, weights.reduce(0, +))
+        return min(0.99, (completed + weights[index] * min(1, currentFraction)) / total)
+    }
+
+    private func countTotal(in phase: String, after marker: String) -> Int {
+        guard let range = phase.range(of: marker) else { return 0 }
+        let token = phase[range.upperBound...].split(separator: " ").first ?? ""
+        return Int(token.split(separator: "/").last ?? "") ?? 0
+    }
+
+    private func countRatio(in phase: String, after marker: String) -> Double? {
+        guard let range = phase.range(of: marker) else { return nil }
+        let token = phase[range.upperBound...].split(separator: " ").first ?? ""
+        let numbers = token.split(separator: "/")
+        guard numbers.count == 2, let count = Double(numbers[0]),
+              let total = Double(numbers[1]), total > 0 else { return nil }
+        return min(1, count / total)
+    }
+
+    private func refreshEstimate(for phase: String) {
+        let fraction = progressFraction(for: phase)
+        let elapsed = Date().timeIntervalSince(jobStartedAt)
+        guard elapsed >= 2, fraction >= 0.12, fraction < 0.98 else { return }
+        let seconds = min(21_600, elapsed * (1 - fraction) / fraction)
+        estimatedFinish = Date().addingTimeInterval(seconds)
     }
 
     private var resultsScreen: some View {
@@ -739,6 +809,8 @@ struct StudioView: View {
         lines = []
         translated = []
         status = "Preparo la traccia audio"
+        jobStartedAt = Date()
+        estimatedFinish = nil
         activeStages = ["Preparazione", "Trascrizione"]
         if diarization { activeStages.append("Parlanti") }
         if translate || mode.requiresTranslation { activeStages.append("Traduzione") }
@@ -767,7 +839,10 @@ struct StudioView: View {
                                                      burnIn: makeBurnIn, burnTranslated: burnTranslated,
                                                      dubbedOnly: dubbedOnly, strictExports: strictExports) { phase in
                         SessionLog.shared.phase(phase)
-                        Task { @MainActor in self.status = phase }
+                        Task { @MainActor in
+                             self.status = phase
+                             self.refreshEstimate(for: phase)
+                         }
                     }
                 }
                 let result = try await withTaskCancellationHandler(operation: {
