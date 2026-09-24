@@ -1,5 +1,7 @@
 # NeMo Studio — note di progetto
 
+- Dopo ogni modifica al codice completata e verificata con esito positivo, crea un commit con i soli file pertinenti, esegui il push sul branch remoto corrispondente e verifica che il commit remoto coincida con quello locale. Prima di pubblicare, sincronizza il branch remoto e preserva le modifiche locali non correlate. Se il push non riesce, segnala il blocco senza dichiarare il lavoro pubblicato.
+
 - Il punto di ingresso è `Avvia-NeMo-Studio.ps1`, un unico script PowerShell 7.2+ per Windows/CUDA con pagina HTML, CSS e JavaScript incorporata.
 - Prima di modificarlo controlla l'intero script, i processi figli, i percorsi dei file e il blocco `finally` che chiude NeMo e la traduzione. Conserva la gestione di `Ctrl+C` nel ciclo UI con `TcpListener.Pending()`.
 - Il percorso predefinito è `D:\Modelli\NeMo-Speech` in `$Base`. Il runtime, i modelli, la cache, i log e i risultati non devono essere committati.
