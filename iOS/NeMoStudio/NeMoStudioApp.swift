@@ -17,7 +17,7 @@ final class StudioAppDelegate: NSObject, UIApplicationDelegate {
 }
 
 // Files → On My iPhone → NeMo Studio → session.log. A new debug session
-// replaces the previous one; no diagnostics are written with Debug disabled.
+// preserves recent sessions; no diagnostics are written with Debug disabled.
 final class SessionLog: @unchecked Sendable {
     static let shared = SessionLog()
     let url: URL
@@ -41,13 +41,25 @@ final class SessionLog: @unchecked Sendable {
                 let legacy = AppStoragePaths.base.appendingPathComponent("session.log")
                 try? FileManager.default.removeItem(at: legacy)
                 do {
-                    try Data().write(to: url, options: .atomic)
+                    let logSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    if logSize > 8_000_000 {
+                        let previous = url.deletingLastPathComponent().appendingPathComponent("session-previous.log")
+                        try? FileManager.default.removeItem(at: previous)
+                        try? FileManager.default.moveItem(at: url, to: previous)
+                    }
+                    if !FileManager.default.fileExists(atPath: url.path) {
+                        try Data().write(to: url, options: .atomic)
+                    }
                     enabled = true
+                    append("──────────────── NEW SESSION ────────────────")
                     let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
                     let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
                     append("SESSION \(sessionID) | NeMo Studio \(version) (\(build)) | \(ProcessInfo.processInfo.operatingSystemVersionString) | RAM \(ProcessInfo.processInfo.physicalMemory / 1_048_576) MiB")
                     if UserDefaults.standard.bool(forKey: "lastSessionUnfinished") {
                         append("PREVIOUS SESSION ended unexpectedly while active (possible crash or system termination)")
+                    }
+                    if UserDefaults.standard.bool(forKey: "jobInProgress") {
+                        append("PREVIOUS JOB interrupted at phase=\(UserDefaults.standard.string(forKey: "lastJobPhase") ?? "unknown"); inspect iOS crash/Analytics logs for the termination reason")
                     }
                     append("DEBUG enabled; models kept in Application Support, log exported in Documents")
                 } catch { enabled = false }
@@ -60,10 +72,14 @@ final class SessionLog: @unchecked Sendable {
 
     func write(_ message: String, always: Bool = false) {
         let event = "\(always ? "EVENT" : "DEBUG") \(message)"
-        queue.async { [self] in if enabled { append(event) } }
+        if always {
+            queue.sync { if enabled { append(event, durable: true) } }
+        } else {
+            queue.async { [self] in if enabled { append(event) } }
+        }
     }
 
-    private func append(_ message: String) {
+    private func append(_ message: String, durable: Bool = false) {
         let safe = message.replacingOccurrences(of: "\n", with: " ")
         let line = "\(formatter.string(from: Date())) \(safe)\n"
         guard let data = line.data(using: .utf8),
@@ -72,7 +88,13 @@ final class SessionLog: @unchecked Sendable {
         do {
             try handle.seekToEnd()
             try handle.write(contentsOf: data)
+            if durable { try handle.synchronize() }
         } catch { /* Diagnostics must never interrupt inference. */ }
+    }
+
+    func phase(_ message: String) {
+        UserDefaults.standard.set(message, forKey: "lastJobPhase")
+        write("Pipeline phase: \(message) | thermal=\(ProcessInfo.processInfo.thermalState.rawValue) | uptime=\(Int(ProcessInfo.processInfo.systemUptime))s", always: true)
     }
 
     func finish() {
@@ -217,6 +239,7 @@ struct StudioView: View {
     @State private var diarization = true
     @State private var working = false
     @State private var status = ""
+    @State private var activeStages: [String] = []
     @State private var lines: [StudioLine] = []
     @State private var translated: [StudioLine] = []
     @State private var files: [URL] = []
@@ -308,6 +331,53 @@ struct StudioView: View {
                 workflowCard
             }
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if working { processingBar }
+        }
+    }
+
+    private var processingBar: some View {
+        let current = stageIndex(for: status)
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Label("Elaborazione sul dispositivo", systemImage: "waveform")
+                    .font(.subheadline.bold())
+                Spacer()
+                Text("Fase \(current + 1) di \(activeStages.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(StudioStyle.muted)
+            }
+            Text(status)
+                .font(.subheadline)
+                .foregroundStyle(StudioStyle.accent)
+                .lineLimit(2)
+            ProgressView(value: Double(current), total: Double(max(1, activeStages.count)))
+                .tint(StudioStyle.accent)
+                .accessibilityLabel("Fasi completate")
+            Text("Fasi completate: \(current) su \(activeStages.count). Il tempo di questa fase dipende dalla durata del file.")
+                .font(.caption)
+                .foregroundStyle(StudioStyle.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Ferma elaborazione", role: .cancel) { job?.cancel() }
+                .font(.subheadline)
+                .foregroundStyle(.orange)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(StudioStyle.surface)
+        .overlay(alignment: .top) { StudioStyle.accent.opacity(0.25).frame(height: 1) }
+    }
+
+    private func stageIndex(for phase: String) -> Int {
+        let stage: String
+        if phase.hasPrefix("Carico Nemotron") || phase.hasPrefix("Trascrivo") { stage = "Trascrizione" }
+        else if phase.hasPrefix("Carico Sortformer") || phase.hasPrefix("Riconosco i parlanti") { stage = "Parlanti" }
+        else if phase.hasPrefix("Carico Riva") || phase.hasPrefix("Traduco") { stage = "Traduzione" }
+        else if phase.hasPrefix("Preparo il doppiaggio") || phase.hasPrefix("Sintetizzo")
+                    || phase.hasPrefix("Creo ") || phase.hasPrefix("Imprimo") { stage = "Esportazione" }
+        else { stage = "Preparazione" }
+        return activeStages.firstIndex(of: stage) ?? 0
     }
 
     private var resultsScreen: some View {
@@ -493,7 +563,12 @@ struct StudioView: View {
             if !StudioMode.videoChoices.contains(mode) {
                 Text(mode.detail).font(.caption).foregroundStyle(StudioStyle.muted)
             }
-            Picker("Lingua originale", selection: $language) {
+            VStack(alignment: .leading, spacing: 7) {
+                Label("Lingua originale del file", systemImage: "waveform")
+                    .font(.subheadline.bold())
+                Text("La lingua parlata nell'audio importato. Serve a riconoscere le parole e a tradurle correttamente.")
+                    .font(.caption).foregroundStyle(StudioStyle.muted)
+                Picker("Lingua originale del file", selection: $language) {
                 Text("Italiano").tag("it-IT")
                 Text("Automatico").tag("auto")
                 Text("Inglese").tag("en")
@@ -501,7 +576,9 @@ struct StudioView: View {
                 Text("Tedesco").tag("de")
                 Text("Spagnolo").tag("es")
             }
-            .tint(StudioStyle.accent)
+                .tint(StudioStyle.accent)
+                .pickerStyle(.menu)
+            }
             Toggle("Riconosci i parlanti con Sortformer", isOn: $diarization)
                 .tint(StudioStyle.accent).font(.subheadline)
             if !mode.requiresTranslation {
@@ -509,15 +586,24 @@ struct StudioView: View {
                     .tint(StudioStyle.accent).font(.subheadline)
             }
             if translate || mode.requiresTranslation {
-                Picker("Lingua di destinazione", selection: $targetLanguage) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Label("Lingua del risultato tradotto", systemImage: "character.bubble")
+                        .font(.subheadline.bold())
+                    Text(mode == .translatedVideo
+                         ? "La lingua della nuova voce nel video. L'audio originale non sarà presente."
+                         : "La lingua dei sottotitoli tradotti o della nuova voce, secondo il risultato scelto.")
+                        .font(.caption).foregroundStyle(StudioStyle.muted)
+                    Picker("Lingua del risultato tradotto", selection: $targetLanguage) {
                     Text("Inglese").tag("en")
                     Text("Italiano").tag("it")
                     Text("Francese").tag("fr")
                     Text("Tedesco").tag("de")
                     Text("Spagnolo").tag("es")
                 }
-                .tint(StudioStyle.accent)
-                Text("La traduzione usa Riva sul dispositivo. Seleziona la lingua originale e una lingua diversa di destinazione.")
+                    .tint(StudioStyle.accent)
+                    .pickerStyle(.menu)
+                }
+                Text("Riva traduce sul dispositivo dalla lingua originale alla lingua del risultato; scegline due diverse.")
                     .font(.caption).foregroundStyle(StudioStyle.muted)
             }
             if (translate || mode.requiresTranslation) && targetLanguage == String(language.prefix(2)) {
@@ -537,11 +623,9 @@ struct StudioView: View {
                 Text("Questo risultato richiede un video con audio.")
                     .font(.caption).foregroundStyle(StudioStyle.muted)
             }
-            if working {
-                Button("Ferma elaborazione", role: .cancel) { job?.cancel() }
-                    .frame(maxWidth: .infinity).buttonStyle(.bordered).tint(.orange)
+            if !working && !status.isEmpty {
+                Text(status).font(.caption).foregroundStyle(StudioStyle.accent)
             }
-            if !status.isEmpty { Text(status).font(.caption).foregroundStyle(StudioStyle.accent) }
             if !library.ready {
                 Text("Prima scarica i modelli nella tab Inizio.")
                     .font(.caption).foregroundStyle(StudioStyle.muted)
@@ -654,7 +738,13 @@ struct StudioView: View {
         files = []
         lines = []
         translated = []
-        status = "Avvio modello locale..."
+        status = "Preparo la traccia audio"
+        activeStages = ["Preparazione", "Trascrizione"]
+        if diarization { activeStages.append("Parlanti") }
+        if translate || mode.requiresTranslation { activeStages.append("Traduzione") }
+        activeStages.append("Esportazione")
+        UserDefaults.standard.set(true, forKey: "jobInProgress")
+        UserDefaults.standard.set(status, forKey: "lastJobPhase")
         let selectedLanguage = language
         let selectedTarget = (translate || mode.requiresTranslation) ? targetLanguage : nil
         let useDiarization = diarization
@@ -676,7 +766,7 @@ struct StudioView: View {
                                                      softSubtitles: makeSoft, dubbing: makeDubbing,
                                                      burnIn: makeBurnIn, burnTranslated: burnTranslated,
                                                      dubbedOnly: dubbedOnly, strictExports: strictExports) { phase in
-                        SessionLog.shared.write("Pipeline phase: \(phase)")
+                        SessionLog.shared.phase(phase)
                         Task { @MainActor in self.status = phase }
                     }
                 }
@@ -698,6 +788,7 @@ struct StudioView: View {
                 status = "Errore: \(error.localizedDescription)"
                 SessionLog.shared.write("Job failed after \(Int(Date().timeIntervalSince(startedAt)))s: \(String(reflecting: error))", always: true)
             }
+            UserDefaults.standard.set(false, forKey: "jobInProgress")
             working = false
             job = nil
         }
