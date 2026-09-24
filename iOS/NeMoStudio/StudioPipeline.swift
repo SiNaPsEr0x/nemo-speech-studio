@@ -194,6 +194,9 @@ enum StudioPipeline {
         try Task.checkCancellation()
         let session = try model.createSession(language: language == "auto" ? nil : language)
         progress("Trascrivo sul dispositivo")
+        let audioDuration = (try? await AVURLAsset(url: audio).load(.duration))?.seconds ?? 0
+        let estimatedChunks = audioDuration.isFinite && audioDuration > 0
+            ? max(1, Int(ceil(audioDuration / 2))) : 0
         let stream = AudioFileLoader.stream(
             url: audio,
             options: AudioFileStreamOptions(targetSampleRate: 16_000, chunkDuration: 2))
@@ -207,7 +210,11 @@ enum StudioPipeline {
             }
             if audioChunks == 1 || audioChunks % 10 == 0 {
                 SessionLog.shared.write("ASR chunks=\(audioChunks) words=\(timedWords.count) elapsed=\(Int(Date().timeIntervalSince(started)))s", always: true)
-                progress("Trascrivo sul dispositivo: \(audioChunks) blocchi audio")
+                if estimatedChunks > 0 {
+                    progress("Trascrivo sul dispositivo: \(min(audioChunks, estimatedChunks))/\(estimatedChunks)")
+                } else {
+                    progress("Trascrivo sul dispositivo: \(audioChunks) blocchi audio")
+                }
             }
         }
         for update in try session.finalize() where !update.words.isEmpty {
@@ -230,6 +237,9 @@ enum StudioPipeline {
         SessionLog.shared.write("Sortformer loaded in \(Int(Date().timeIntervalSince(started)))s", always: true)
         try Task.checkCancellation()
         progress("Riconosco i parlanti")
+        let audioDuration = (try? await AVURLAsset(url: audio).load(.duration))?.seconds ?? 0
+        let estimatedChunks = audioDuration.isFinite && audioDuration > 0
+            ? max(1, Int(ceil(audioDuration / 30))) : 0
         let speakerSession = diarizer.makeStreamingSession()
         let audioStream = AudioFileLoader.stream(
             url: audio,
@@ -241,7 +251,11 @@ enum StudioPipeline {
             diarChunks += 1
             if diarChunks == 1 || diarChunks % 5 == 0 {
                 SessionLog.shared.write("Sortformer chunks=\(diarChunks) elapsed=\(Int(Date().timeIntervalSince(started)))s", always: true)
-                progress("Riconosco i parlanti: \(diarChunks) blocchi audio")
+                if estimatedChunks > 0 {
+                    progress("Riconosco i parlanti: \(min(diarChunks, estimatedChunks))/\(estimatedChunks)")
+                } else {
+                    progress("Riconosco i parlanti: \(diarChunks) blocchi audio")
+                }
             }
         }
         let segments = try speakerSession.finish().segments
