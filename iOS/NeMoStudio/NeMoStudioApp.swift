@@ -582,66 +582,114 @@ struct StudioView: View {
     }
 
     private var modelCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Label("Modelli", systemImage: "square.stack.3d.up.fill").font(.headline)
+                Label("Modelli sul tuo iPhone", systemImage: "square.stack.3d.up.fill")
+                    .font(.headline)
                 Spacer()
-                Text(library.downloading ? "DOWNLOAD" : library.ready ? "PRONTI" : "DA COMPLETARE")
-                    .font(.caption2.bold()).foregroundStyle(library.ready ? StudioStyle.accent : StudioStyle.muted)
+                Text(library.ready ? "PRONTI" : "DA COMPLETARE")
+                    .font(.caption2.bold())
+                    .foregroundStyle(library.ready ? StudioStyle.accent : StudioStyle.muted)
             }
-            Text(library.status).font(.subheadline).foregroundStyle(StudioStyle.muted)
-            LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading),
-                                GridItem(.flexible(), alignment: .leading)],
-                      alignment: .leading, spacing: 10) {
-                ForEach(library.models) { model in
-                    HStack(spacing: 6) {
-                        Image(systemName: model.installed ? "checkmark.circle.fill" : "circle.dashed")
-                            .foregroundStyle(model.installed ? StudioStyle.accent : StudioStyle.muted)
-                        Text(model.name).foregroundStyle(model.installed ? .white : StudioStyle.muted)
-                            .lineLimit(1).minimumScaleFactor(0.8)
-                    }
-                    .font(.caption)
-                    .accessibilityLabel("\(model.name): \(model.installed ? "sul dispositivo" : "da scaricare")")
-                }
-            }
-            .padding(13)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 14))
-            if library.downloading {
-                ProgressView(value: library.fraction).tint(StudioStyle.accent)
-                Text("\(Int(library.fraction * 100))% · puoi fermarti e riprendere")
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Memoria: \(library.memoryGB) GB · \(library.availableStorage)")
+                    .font(.subheadline.bold())
+                Text("La scelta usa la RAM del dispositivo; velocità e stabilità dipendono anche dal video e dagli altri processi aperti.")
                     .font(.caption).foregroundStyle(StudioStyle.muted)
             }
-            if library.ready && !library.downloading {
-                HStack {
-                    Label("Tutto pronto", systemImage: "checkmark.seal.fill")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(StudioStyle.accent)
-                    Spacer()
-                    Menu {
-                        Button("Verifica / ripara modelli", systemImage: "arrow.clockwise") {
-                            library.downloadAll()
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.title3).foregroundStyle(StudioStyle.muted)
-                            .frame(minWidth: 44, minHeight: 44)
-                    }
-                    .accessibilityLabel("Opzioni modelli")
-                }
-            } else {
-                HStack(spacing: 10) {
-                    Button("Scarica / riprendi") { library.downloadAll() }
-                        .frame(maxWidth: .infinity)
-                        .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
-                        .disabled(library.downloading)
-                    if library.downloading {
-                        Button("Ferma") { library.stop() }
-                            .buttonStyle(.bordered).tint(StudioStyle.accent)
-                    }
-                }
-                .controlSize(.large)
+            Text("Traduzione Riva 4B · classifica per qualità")
+                .font(.subheadline.bold())
+            Text("È lo stesso modello in quattro precisioni. Più precisione richiede più spazio e memoria.")
+                .font(.caption).foregroundStyle(StudioStyle.muted)
+            Button {
+                library.select(library.recommendedRiva)
+            } label: {
+                Label("Scegli il massimo consigliato: \(library.recommendedRiva.rawValue)",
+                      systemImage: "sparkles")
+                    .frame(maxWidth: .infinity)
             }
-        }.card()
+            .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+            .disabled(library.downloading || working)
+            ForEach(Array(RivaQuality.allCases.reversed())) { quality in
+                let selected = library.selectedRiva == quality
+                let installed = FileManager.default.fileExists(atPath: quality.path.path)
+                Button {
+                    library.select(quality)
+                } label: {
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(selected ? StudioStyle.accent : StudioStyle.muted)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("\(quality.rawValue) · \(quality.sizeGB) GB")
+                                .font(.subheadline.weight(.semibold))
+                            Text(quality.description)
+                                .font(.caption).foregroundStyle(StudioStyle.muted)
+                            if quality == library.recommendedRiva {
+                                Text("Consigliato per questo dispositivo")
+                                    .font(.caption2.bold()).foregroundStyle(StudioStyle.accent)
+                            }
+                        }
+                        Spacer()
+                        if installed {
+                            Image(systemName: "internaldrive.fill")
+                                .foregroundStyle(StudioStyle.accent)
+                        }
+                    }
+                    .foregroundStyle(.white)
+                    .padding(12)
+                    .background(selected ? StudioStyle.accent.opacity(0.13) : StudioStyle.background,
+                                in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14)
+                        .strokeBorder(selected ? StudioStyle.accent : StudioStyle.muted.opacity(0.2)))
+                }
+                .buttonStyle(.plain)
+                .disabled(library.downloading || working)
+            }
+            Text("Q8 è la qualità più alta disponibile, ma non è ancora verificata su tutti i dispositivi. Puoi selezionarla manualmente.")
+                .font(.caption).foregroundStyle(StudioStyle.muted)
+            Text("Modelli per voce e sottotitoli")
+                .font(.subheadline.bold())
+            ForEach(library.models) { model in
+                HStack(spacing: 8) {
+                    Image(systemName: model.installed ? "checkmark.circle.fill" : "circle.dashed")
+                        .foregroundStyle(model.installed ? StudioStyle.accent : StudioStyle.muted)
+                    Text(model.name).font(.caption.bold())
+                    Spacer(minLength: 4)
+                    if model.installed {
+                        Button("Elimina") {
+                            do { try library.deleteModel(model.id) }
+                            catch {
+                                status = "Impossibile eliminare \(model.name): \(error.localizedDescription)"
+                                SessionLog.shared.write(status, always: true)
+                            }
+                        }
+                        .tint(.orange)
+                    } else {
+                        Button("Scarica") { library.downloadModel(model.id) }
+                            .tint(StudioStyle.accent)
+                    }
+                }
+                .controlSize(.small)
+                .disabled(library.downloading || working)
+            }
+            Text("Nemotron riconosce le parole · Sortformer distingue fino a 4 parlanti · Magpie crea la voce · Riva traduce.")
+                .font(.caption).foregroundStyle(StudioStyle.muted)
+            Text(library.status).font(.caption).foregroundStyle(StudioStyle.muted)
+            if library.downloading {
+                ProgressView(value: library.fraction).tint(StudioStyle.accent)
+                Button("Ferma download") { library.stop() }
+                    .tint(.orange)
+            } else if !library.ready {
+                Button("Scarica i modelli mancanti") { library.downloadAll() }
+                    .frame(maxWidth: .infinity)
+                    .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+                    .disabled(working)
+            } else {
+                Label("Configurazione pronta", systemImage: "checkmark.seal.fill")
+                    .font(.caption.bold()).foregroundStyle(StudioStyle.accent)
+            }
+        }
+        .card()
     }
 
     private var workflowCard: some View {
