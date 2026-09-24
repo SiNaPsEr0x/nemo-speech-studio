@@ -559,7 +559,7 @@ struct StudioView: View {
 
     private var resultsCard: some View {
         VStack(alignment: .leading, spacing: 18) {
-            if lines.isEmpty {
+            if lines.isEmpty && files.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "waveform.badge.magnifyingglass")
                         .font(.system(size: 38)).foregroundStyle(StudioStyle.accent)
@@ -572,43 +572,55 @@ struct StudioView: View {
                 }
                 .frame(maxWidth: .infinity).padding(.vertical, 30)
             }
+            let videos = displayFiles.filter(isVideo)
+            if !videos.isEmpty {
+                Label("Video pronti", systemImage: "film.stack.fill").font(.headline)
+                ForEach(videos, id: \.self) { file in fileRow(file) }
+            }
+            let otherFiles = displayFiles.filter { !isVideo($0) }
+            if !otherFiles.isEmpty {
+                Divider().overlay(StudioStyle.muted.opacity(0.4))
+                Text("Altri file").font(.headline)
+                ForEach(otherFiles, id: \.self) { file in fileRow(file) }
+            }
             if !lines.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Trascrizione").font(.headline)
-                    ForEach(lines) { line in
-                        Text("\(line.speaker > 0 ? "Speaker \(line.speaker) · " : "")\(line.text)")
-                            .font(.caption).foregroundStyle(.white.opacity(0.9))
+                DisclosureGroup("Leggi trascrizione") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(lines) { line in
+                            Text("\(line.speaker > 0 ? "Speaker \(line.speaker) · " : "")\(line.text)")
+                                .font(.caption).foregroundStyle(.white.opacity(0.9))
+                        }
                     }
                 }
+                .tint(StudioStyle.accent)
             }
             if !translated.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Traduzione Riva").font(.headline)
-                    ForEach(translated) { line in
-                        Text("\(line.speaker > 0 ? "Speaker \(line.speaker) · " : "")\(line.text)")
-                            .font(.caption).foregroundStyle(.white.opacity(0.9))
-                    }
-                }
-            }
-            if !files.isEmpty {
-                Divider().overlay(StudioStyle.muted.opacity(0.4))
-                Text("File pronti").font(.headline)
-                ForEach(displayFiles, id: \.self) { file in
-                    ShareLink(item: file) {
-                        HStack {
-                            Image(systemName: isVideo(file) ? "film.fill" : "doc.fill")
-                            Text(file.lastPathComponent).lineLimit(2)
-                            Spacer()
-                            Image(systemName: "square.and.arrow.up")
+                DisclosureGroup("Leggi traduzione") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(translated) { line in
+                            Text("\(line.speaker > 0 ? "Speaker \(line.speaker) · " : "")\(line.text)")
+                                .font(.caption).foregroundStyle(.white.opacity(0.9))
                         }
-                        .font(.subheadline)
-                        .foregroundStyle(StudioStyle.accent)
-                        .padding(12)
-                        .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 12))
                     }
                 }
+                .tint(StudioStyle.accent)
             }
         }.card()
+    }
+
+    private func fileRow(_ file: URL) -> some View {
+        ShareLink(item: file) {
+            HStack {
+                Image(systemName: isVideo(file) ? "film.fill" : "doc.fill")
+                Text(file.lastPathComponent).lineLimit(2)
+                Spacer()
+                Image(systemName: "square.and.arrow.up")
+            }
+            .font(.subheadline)
+            .foregroundStyle(StudioStyle.accent)
+            .padding(12)
+            .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 12))
+        }
     }
 
     private var voiceCard: some View {
