@@ -354,17 +354,22 @@ struct StudioView: View {
             if importing { ProgressView("Importazione video…").tint(StudioStyle.accent) }
             HStack(spacing: 10) {
                 Button { importerOpen = true } label: {
-                    Label("File", systemImage: "folder.fill").frame(maxWidth: .infinity)
+                    Label("File", systemImage: "folder.fill")
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 54)
                 }
                 .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+                .frame(maxWidth: .infinity)
                 PhotosPicker(selection: $selectedPhoto, matching: .videos) {
-                    Label("Foto e video", systemImage: "photo.on.rectangle.angled")
+                    Label("Foto", systemImage: "photo.on.rectangle.angled")
                         .frame(maxWidth: .infinity)
+                        .frame(height: 54)
                 }
-                .buttonStyle(.bordered).tint(StudioStyle.accent)
+                .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+                .frame(maxWidth: .infinity)
             }
-            .controlSize(.large).disabled(importing)
-            Text("Scegli audio o video da File oppure un video dalla galleria.")
+            .disabled(importing || working)
+            Text("Audio o video da File · video dalla galleria Foto")
                 .font(.caption).foregroundStyle(StudioStyle.muted)
         }.card()
     }
@@ -434,12 +439,60 @@ struct StudioView: View {
 
     private var workflowCard: some View {
         VStack(alignment: .leading, spacing: 17) {
-            Label("Elaborazione", systemImage: "slider.horizontal.3").font(.headline)
-            Picker("Preset", selection: $mode) {
-                ForEach(StudioMode.allCases) { option in Text(option.rawValue).tag(option) }
+            Label("Cosa vuoi creare?", systemImage: "slider.horizontal.3")
+                .font(.headline)
+            Text("VIDEO FINALE")
+                .font(.caption.bold()).tracking(1.2).foregroundStyle(StudioStyle.muted)
+            ForEach(StudioMode.videoChoices) { option in
+                Button {
+                    mode = option
+                    SessionLog.shared.write("Preset selezionato: \(option.rawValue)")
+                } label: {
+                    HStack(spacing: 13) {
+                        Image(systemName: option.symbol)
+                            .font(.title3)
+                            .frame(width: 28)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(option.rawValue).font(.subheadline.weight(.semibold))
+                            Text(option.detail)
+                                .font(.caption)
+                                .foregroundStyle(StudioStyle.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: mode == option ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(mode == option ? StudioStyle.accent : StudioStyle.muted)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(mode == option ? StudioStyle.accent.opacity(0.16) : StudioStyle.background,
+                                in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14)
+                        .strokeBorder(mode == option ? StudioStyle.accent : StudioStyle.muted.opacity(0.2)))
+                }
+                .buttonStyle(.plain)
+                .disabled(working)
+                .accessibilityAddTraits(mode == option ? .isSelected : [])
             }
-            .tint(StudioStyle.accent)
-            .onChange(of: mode) { _, value in SessionLog.shared.write("Preset selezionato: \(value.rawValue)") }
+            Menu {
+                ForEach(StudioMode.otherChoices) { option in
+                    Button(option.rawValue) {
+                        mode = option
+                        SessionLog.shared.write("Preset selezionato: \(option.rawValue)")
+                    }
+                }
+            } label: {
+                Label(StudioMode.videoChoices.contains(mode) ? "Altri risultati" : mode.rawValue,
+                      systemImage: "square.stack.3d.up")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered).tint(StudioStyle.accent)
+            .controlSize(.large)
+            .disabled(working)
+            if !StudioMode.videoChoices.contains(mode) {
+                Text(mode.detail).font(.caption).foregroundStyle(StudioStyle.muted)
+            }
             Picker("Lingua originale", selection: $language) {
                 Text("Italiano").tag("it-IT")
                 Text("Automatico").tag("auto")
@@ -451,9 +504,11 @@ struct StudioView: View {
             .tint(StudioStyle.accent)
             Toggle("Riconosci i parlanti con Sortformer", isOn: $diarization)
                 .tint(StudioStyle.accent).font(.subheadline)
-            Toggle("Traduci in locale con Riva 4B", isOn: $translate)
-                .tint(StudioStyle.accent).font(.subheadline)
-            if translate {
+            if !mode.requiresTranslation {
+                Toggle("Traduci in locale con Riva 4B", isOn: $translate)
+                    .tint(StudioStyle.accent).font(.subheadline)
+            }
+            if translate || mode.requiresTranslation {
                 Picker("Lingua di destinazione", selection: $targetLanguage) {
                     Text("Inglese").tag("en")
                     Text("Italiano").tag("it")
@@ -461,27 +516,25 @@ struct StudioView: View {
                     Text("Tedesco").tag("de")
                     Text("Spagnolo").tag("es")
                 }
-                Text("Riva supporta queste lingue tramite l’inglese; scegli una lingua originale esplicita per la traduzione.")
-                    .font(.caption2).foregroundStyle(StudioStyle.muted)
+                .tint(StudioStyle.accent)
+                Text("La traduzione usa Riva sul dispositivo. Seleziona la lingua originale e una lingua diversa di destinazione.")
+                    .font(.caption).foregroundStyle(StudioStyle.muted)
             }
-            Text(mode == .dubbing
-                 ? "WAV dei parlanti; per MP4/MOV compatibili creo anche un MOV con audio originale e doppiaggio selezionabili."
-                 : mode == .burnIn
-                    ? "SRT/ASS e MP4 con sottotitoli impressi nei video compatibili."
-                 : mode == .softSubtitles
-                    ? "MKV con video originale, audio e sottotitoli selezionabili. Supporta video H.264/HEVC con audio AAC."
-                 : mode == .complete
-                    ? "Trascrizione, SRT/VTT/ASS, MKV con sottotitoli selezionabili, MP4 impresso e doppiaggio WAV/MOV."
-                    : "Nemotron 3.5, Sortformer e Riva elaborano sul dispositivo. I modelli vanno scaricati una sola volta.")
-                .font(.caption).foregroundStyle(StudioStyle.muted)
+            if (translate || mode.requiresTranslation) && targetLanguage == String(language.prefix(2)) {
+                Text("Scegli una lingua di destinazione diversa dall'originale.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
             Button { start() } label: {
-                Label(working ? "Elaborazione in corso" : "Avvia elaborazione", systemImage: "play.fill")
+                Label(working ? "Elaborazione in corso" : "Crea risultato", systemImage: "play.fill")
                     .frame(maxWidth: .infinity)
             }
-                .buttonStyle(.borderedProminent).tint(StudioStyle.accent).controlSize(.large)
-                .disabled(working || importing || !library.ready || selectedFile == nil || (mode.needsVideo && !selectedHasVideo) || ((translate || mode == .dubbing || mode == .complete) && language == "auto"))
+            .buttonStyle(.borderedProminent).tint(StudioStyle.accent).controlSize(.large)
+            .disabled(working || importing || !library.ready || selectedFile == nil
+                || (mode.needsVideo && !selectedHasVideo)
+                || ((translate || mode.requiresTranslation || mode == .dubbing || mode == .complete) && language == "auto")
+                || ((translate || mode.requiresTranslation) && targetLanguage == String(language.prefix(2))))
             if mode.needsVideo && selectedFile != nil && !selectedHasVideo {
-                Text("Questo preset richiede un video con audio.")
+                Text("Questo risultato richiede un video con audio.")
                     .font(.caption).foregroundStyle(StudioStyle.muted)
             }
             if working {
