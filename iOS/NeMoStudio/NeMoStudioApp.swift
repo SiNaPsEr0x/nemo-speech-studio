@@ -1,4 +1,7 @@
+import AVFoundation
 import Foundation
+import CoreTransferable
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 import AudioCommon
@@ -139,6 +142,23 @@ private enum StudioStyle {
 
 private enum StudioTab: Hashable { case home, studio, results, voice }
 
+// Photos gives the app a temporary file; preserve it inside the transfer
+// callback so long videos never have to pass through an in-memory Data value.
+private struct ImportedMovie: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { movie in
+            SentTransferredFile(movie.url)
+        } importing: { received in
+            let name = "photo-\(UUID().uuidString).\(received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension)"
+            let destination = AppStoragePaths.temporary.appendingPathComponent(name)
+            try FileManager.default.copyItem(at: received.file, to: destination)
+            return Self(url: destination)
+        }
+    }
+}
+
 private enum StudioMode: String, CaseIterable, Identifiable {
     case transcription = "Trascrizione"
     case subtitles = "Sottotitoli"
@@ -147,16 +167,16 @@ private enum StudioMode: String, CaseIterable, Identifiable {
     case dubbing = "Doppiaggio"
     case complete = "Tutto"
     var id: String { rawValue }
-    var available: Bool {
-        self == .transcription || self == .subtitles || self == .dubbing || self == .burnIn
-    }
+    var needsVideo: Bool { self == .softSubtitles || self == .burnIn || self == .complete }
 }
 
 struct StudioView: View {
     @StateObject private var library = ModelLibrary()
     @State private var selectedTab: StudioTab = .home
     @State private var importerOpen = false
+    @State private var selectedPhoto: PhotosPickerItem?
     @State private var selectedFile: URL?
+    @State private var selectedHasVideo = false
     @State private var importing = false
     @State private var mode: StudioMode = .transcription
     @State private var info: String?
@@ -182,7 +202,7 @@ struct StudioView: View {
             Tab("Voce", systemImage: "mic.fill", value: .voice) { voiceScreen }
         }
         .tint(StudioStyle.accent)
-        .fileImporter(isPresented: $importerOpen, allowedContentTypes: [.audio, .movie, .video, .mpeg4Movie, .data]) { result in
+        .fileImporter(isPresented: $importerOpen, allowedContentTypes: [.item]) { result in
             switch result {
             case .success(let url): importMedia(url)
             case .failure(let error):
@@ -198,6 +218,10 @@ struct StudioView: View {
         }
         .onChange(of: selectedTab) { _, tab in
             SessionLog.shared.write("Tab \(String(describing: tab))")
+        }
+        .onChange(of: selectedPhoto) { _, item in
+            guard let item else { return }
+            importPhoto(item)
         }
     }
 
@@ -291,21 +315,26 @@ struct StudioView: View {
         VStack(alignment: .leading, spacing: 15) {
             Label("File da elaborare", systemImage: "square.and.arrow.down.fill")
                 .font(.headline).foregroundStyle(.white)
-            Button { importerOpen = true } label: {
-                VStack(spacing: 10) {
-                    Image(systemName: selectedFile == nil ? "plus.circle.fill" : "waveform")
-                        .font(.system(size: 30)).foregroundStyle(StudioStyle.accent)
-                    Text(importing ? "Importazione…" : (selectedFile?.lastPathComponent ?? "Scegli audio o video"))
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white).lineLimit(2)
-                    Text("Apri un file da File o da un'altra app")
-                        .font(.caption).foregroundStyle(StudioStyle.muted)
-                }
-                .frame(maxWidth: .infinity).padding(.vertical, 22)
-                .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 17))
+            if let selectedFile {
+                Label(selectedFile.lastPathComponent, systemImage: "checkmark.circle.fill")
+                    .font(.subheadline).foregroundStyle(StudioStyle.accent)
+                    .lineLimit(2)
             }
-            .buttonStyle(.plain)
-            .disabled(importing)
+            if importing { ProgressView("Importazione video…").tint(StudioStyle.accent) }
+            HStack(spacing: 10) {
+                Button { importerOpen = true } label: {
+                    Label("File", systemImage: "folder.fill").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+                PhotosPicker(selection: $selectedPhoto, matching: .videos) {
+                    Label("Foto e video", systemImage: "photo.on.rectangle.angled")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered).tint(StudioStyle.accent)
+            }
+            .controlSize(.large).disabled(importing)
+            Text("Scegli audio o video da File oppure un video dalla galleria.")
+                .font(.caption).foregroundStyle(StudioStyle.muted)
         }.card()
     }
 
@@ -408,16 +437,22 @@ struct StudioView: View {
                  ? "WAV dei parlanti; per MP4/MOV compatibili creo anche un MOV con audio originale e doppiaggio selezionabili."
                  : mode == .burnIn
                     ? "SRT/ASS e MP4 con sottotitoli impressi nei video compatibili."
-                 : (mode.available
-                    ? "Nemotron 3.5, Sortformer e Riva elaborano sul dispositivo. I modelli vanno scaricati una sola volta."
-                    : "Questo preset richiede ancora produzione video iOS: non produce risultati simulati."))
+                 : mode == .softSubtitles
+                    ? "MKV con video originale, audio e sottotitoli selezionabili. Supporta video H.264/HEVC con audio AAC."
+                 : mode == .complete
+                    ? "Trascrizione, SRT/VTT/ASS, MKV con sottotitoli selezionabili, MP4 impresso e doppiaggio WAV/MOV."
+                    : "Nemotron 3.5, Sortformer e Riva elaborano sul dispositivo. I modelli vanno scaricati una sola volta.")
                 .font(.caption).foregroundStyle(StudioStyle.muted)
             Button { start() } label: {
                 Label(working ? "Elaborazione in corso" : "Avvia elaborazione", systemImage: "play.fill")
                     .frame(maxWidth: .infinity)
             }
                 .buttonStyle(.borderedProminent).tint(StudioStyle.accent).controlSize(.large)
-                .disabled(working || importing || !library.ready || selectedFile == nil || !mode.available || ((translate || mode == .dubbing) && language == "auto"))
+                .disabled(working || importing || !library.ready || selectedFile == nil || (mode.needsVideo && !selectedHasVideo) || ((translate || mode == .dubbing || mode == .complete) && language == "auto"))
+            if mode.needsVideo && selectedFile != nil && !selectedHasVideo {
+                Text("Questo preset richiede un video con audio.")
+                    .font(.caption).foregroundStyle(StudioStyle.muted)
+            }
             if working {
                 Button("Ferma elaborazione", role: .cancel) { job?.cancel() }
                     .frame(maxWidth: .infinity).buttonStyle(.bordered).tint(.orange)
@@ -519,18 +554,21 @@ struct StudioView: View {
         let selectedLanguage = language
         let selectedTarget = translate && targetLanguage != String(language.prefix(2)) ? targetLanguage : nil
         let useDiarization = diarization
-        let makeSubtitles = mode == .subtitles || mode == .burnIn
-        let makeDubbing = mode == .dubbing
-        let makeBurnIn = mode == .burnIn
+        let makeSubtitles = mode != .transcription && mode != .dubbing
+        let makeSoft = mode == .softSubtitles || mode == .complete
+        let makeDubbing = mode == .dubbing || mode == .complete
+        let makeBurnIn = mode == .burnIn || mode == .complete
+        let strictExports = mode == .complete
         let startedAt = Date()
-        SessionLog.shared.write("Job start mode=\(mode.rawValue) language=\(selectedLanguage) target=\(selectedTarget ?? "none") diarization=\(useDiarization) subtitles=\(makeSubtitles) dubbing=\(makeDubbing) burnIn=\(makeBurnIn) media=\(selectedFile.lastPathComponent)", always: true)
+        SessionLog.shared.write("Job start mode=\(mode.rawValue) language=\(selectedLanguage) target=\(selectedTarget ?? "none") diarization=\(useDiarization) subtitles=\(makeSubtitles) soft=\(makeSoft) dubbing=\(makeDubbing) burnIn=\(makeBurnIn) media=\(selectedFile.lastPathComponent)", always: true)
         job = Task {
             do {
                 let worker = Task.detached(priority: .userInitiated) {
                     try await StudioPipeline.process(source: selectedFile, language: selectedLanguage,
                                                      targetLanguage: selectedTarget,
                                                      diarization: useDiarization, subtitles: makeSubtitles,
-                                                     dubbing: makeDubbing, burnIn: makeBurnIn) { phase in
+                                                     softSubtitles: makeSoft, dubbing: makeDubbing,
+                                                     burnIn: makeBurnIn, strictExports: strictExports) { phase in
                         SessionLog.shared.write("Pipeline phase: \(phase)")
                         Task { @MainActor in self.status = phase }
                     }
@@ -596,8 +634,16 @@ struct StudioView: View {
                     try FileManager.default.copyItem(at: url, to: destination)
                     return destination
                 }.value
+                let hasVideo: Bool
+                do {
+                    hasVideo = try await validateMedia(destination)
+                } catch {
+                    try? FileManager.default.removeItem(at: destination)
+                    throw error
+                }
                 if let previous = selectedFile { try? FileManager.default.removeItem(at: previous) }
                 selectedFile = destination
+                selectedHasVideo = hasVideo
                 let bytes = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 SessionLog.shared.write("Import complete file=\(destination.lastPathComponent) bytes=\(bytes)", always: true)
             } catch {
@@ -606,6 +652,43 @@ struct StudioView: View {
             }
             importing = false
         }
+    }
+
+    private func importPhoto(_ item: PhotosPickerItem) {
+        importing = true
+        selectedPhoto = nil
+        SessionLog.shared.write("Photos import started")
+        Task {
+            do {
+                guard let movie = try await item.loadTransferable(type: ImportedMovie.self) else {
+                    throw StudioPipelineError.unsupportedFormat
+                }
+                let hasVideo: Bool
+                do {
+                    hasVideo = try await validateMedia(movie.url)
+                } catch {
+                    try? FileManager.default.removeItem(at: movie.url)
+                    throw error
+                }
+                if let previous = selectedFile { try? FileManager.default.removeItem(at: previous) }
+                selectedFile = movie.url
+                selectedHasVideo = hasVideo
+                SessionLog.shared.write("Photos import complete file=\(movie.url.lastPathComponent)", always: true)
+            } catch {
+                info = "Video dalla galleria non importato: \(error.localizedDescription)"
+                SessionLog.shared.write("Photos import failed: \(String(reflecting: error))", always: true)
+            }
+            importing = false
+        }
+    }
+
+    private func validateMedia(_ url: URL) async throws -> Bool {
+        let asset = AVURLAsset(url: url)
+        let audio = try await asset.loadTracks(withMediaType: .audio)
+        let video = try await asset.loadTracks(withMediaType: .video)
+        guard !audio.isEmpty else { throw StudioPipelineError.noAudio }
+        SessionLog.shared.write("Media validated audioTracks=\(audio.count) videoTracks=\(video.count)")
+        return !video.isEmpty
     }
 }
 

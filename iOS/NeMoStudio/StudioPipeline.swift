@@ -41,11 +41,13 @@ enum StudioPipeline {
         targetLanguage: String?,
         diarization: Bool,
         subtitles: Bool,
+        softSubtitles: Bool,
         dubbing: Bool,
         burnIn: Bool,
+        strictExports: Bool,
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> StudioResult {
-        SessionLog.shared.write("Pipeline input type=\(source.pathExtension.lowercased()) diarization=\(diarization) subtitles=\(subtitles) dubbing=\(dubbing) burnIn=\(burnIn)")
+        SessionLog.shared.write("Pipeline input type=\(source.pathExtension.lowercased()) diarization=\(diarization) subtitles=\(subtitles) soft=\(softSubtitles) dubbing=\(dubbing) burnIn=\(burnIn)")
         progress("Preparo la traccia audio")
         let audio = try await prepareAudio(source)
         SessionLog.shared.write("Audio prepared type=\(audio.pathExtension.lowercased())")
@@ -142,6 +144,20 @@ enum StudioPipeline {
             files += try writeTranscripts(translated, to: directory, suffix: "-tradotta")
             if subtitles { files += try writeSubtitles(translated, to: directory, suffix: "-tradotti") }
         }
+        if softSubtitles {
+            try Task.checkCancellation()
+            progress("Creo MKV con sottotitoli selezionabili")
+            let video = directory.appendingPathComponent("video-traccia-sottotitoli.mkv")
+            do {
+                try await MatroskaMuxer.write(source: source, captions: lines,
+                                               translated: translated, output: video)
+                files.append(video)
+                SessionLog.shared.write("MKV with selectable subtitle tracks exported", always: true)
+            } catch {
+                try? FileManager.default.removeItem(at: video)
+                throw error
+            }
+        }
         if dubbing {
             try Task.checkCancellation()
             progress("Preparo il doppiaggio Magpie + NanoCodec")
@@ -165,6 +181,7 @@ enum StudioPipeline {
                     throw CancellationError()
                 } catch {
                     try? FileManager.default.removeItem(at: video)
+                    if strictExports { throw error }
                     let warning = "MOV non disponibile: \(error.localizedDescription). WAV pronto."
                     SessionLog.shared.write(warning, always: true)
                     warnings.append(warning)
@@ -186,6 +203,7 @@ enum StudioPipeline {
                 throw CancellationError()
             } catch {
                 try? FileManager.default.removeItem(at: video)
+                if strictExports { throw error }
                 let warning = "MP4 non disponibile: \(error.localizedDescription). SRT e ASS pronti."
                 SessionLog.shared.write(warning, always: true)
                 warnings.append(warning)
