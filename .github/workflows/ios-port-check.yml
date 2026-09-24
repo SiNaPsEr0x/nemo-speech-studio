@@ -52,11 +52,11 @@ jobs:
             echo '::error::La compilazione ha prodotto warning; correggerli prima di pubblicare.'
             exit 1
           fi
-      - name: Remux sample MP4 and verify MKV video, audio, subtitle tracks
+      - name: Remux H.264 and HEVC MP4 into MKV with AAC and selectable subtitles
         working-directory: iOS
         run: |
           set -euo pipefail
-          command -v ffprobe >/dev/null || brew install ffmpeg
+          command -v ffprobe >/dev/null && command -v ffmpeg >/dev/null || brew install ffmpeg
           swiftc -swift-version 6 -framework AVFoundation \
             NeMoStudio/MatroskaMuxer.swift Scripts/verify_mkv.swift \
             -o "$RUNNER_TEMP/verify-mkv" 2>&1 | tee "$RUNNER_TEMP/nemo-smoke-swift.log"
@@ -64,18 +64,29 @@ jobs:
             echo '::error::La verifica MKV ha prodotto warning Swift.'
             exit 1
           fi
-          "$RUNNER_TEMP/verify-mkv" Tests/Fixtures/short.mp4 "$RUNNER_TEMP/short.mkv"
-          ffprobe -v error -show_entries stream=codec_name,codec_type -of json \
-            "$RUNNER_TEMP/short.mkv" > "$RUNNER_TEMP/mkv-streams.json"
-          python3 - "$RUNNER_TEMP/mkv-streams.json" <<'PY'
+          ffmpeg -v error -xerror -y -i Tests/Fixtures/short.mp4 \
+            -c:v libx265 -tag:v hvc1 -c:a copy \
+            "$RUNNER_TEMP/short-hevc.mp4"
+          for codec in h264 hevc; do
+            if [ "$codec" = h264 ]; then
+              source=Tests/Fixtures/short.mp4
+            else
+              source="$RUNNER_TEMP/short-hevc.mp4"
+            fi
+            target="$RUNNER_TEMP/short-$codec.mkv"
+            "$RUNNER_TEMP/verify-mkv" "$source" "$target"
+            ffprobe -v error -show_entries stream=codec_name,codec_type -of json \
+              "$target" > "$RUNNER_TEMP/mkv-$codec-streams.json"
+            python3 - "$RUNNER_TEMP/mkv-$codec-streams.json" "$codec" <<'PY'
           import json, sys
-          streams = json.load(open(sys.argv[1]))['streams']
-          assert len(streams) == 4, streams
+          with open(sys.argv[1], encoding='utf-8') as stream_file:
+              streams = json.load(stream_file)['streams']
           assert sorted((s['codec_type'], s['codec_name']) for s in streams) == [
-              ('audio', 'aac'), ('subtitle', 'subrip'), ('subtitle', 'subrip'), ('video', 'h264')
+              ('audio', 'aac'), ('subtitle', 'subrip'), ('subtitle', 'subrip'), ('video', sys.argv[2])
           ], streams
           PY
-          ffmpeg -v error -xerror -i "$RUNNER_TEMP/short.mkv" -map 0:v:0 -map 0:a:0 -f null -
+            ffmpeg -v error -xerror -i "$target" -map 0:v:0 -map 0:a:0 -f null -
+          done
       - name: Package and verify unsigned IPA
         run: |
           mkdir -p "$RUNNER_TEMP/nemo-ipa/Payload"
