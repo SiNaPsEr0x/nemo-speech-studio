@@ -168,9 +168,24 @@ private enum StudioTab: Hashable { case home, studio, results, voice }
 
 private enum PhotoExportError: LocalizedError {
     case accessDenied
+    case invalidVideo
 
     var errorDescription: String? {
-        "Consenti a NeMo Studio di aggiungere video in Impostazioni → Foto."
+        switch self {
+        case .accessDenied: "Consenti a NeMo Studio di aggiungere video in Impostazioni → Foto."
+        case .invalidVideo: "Il video non è leggibile da iOS e non può essere salvato in Foto."
+        }
+    }
+}
+
+private enum PhotoLibraryWriter {
+    static func saveVideo(_ file: URL) async throws {
+        try await PHPhotoLibrary.shared().performChanges { @Sendable in
+            let options = PHAssetResourceCreationOptions()
+            options.originalFilename = file.lastPathComponent
+            options.shouldMoveFile = false
+            PHAssetCreationRequest.forAsset().addResource(with: .video, fileURL: file, options: options)
+        }
     }
 }
 
@@ -960,19 +975,22 @@ struct StudioView: View {
 
     private func saveToPhotos(_ file: URL) {
         savingVideo = file
+        SessionLog.shared.write("Photos save started type=\(file.pathExtension.lowercased())", always: true)
         Task {
             do {
-                let authorization = await withCheckedContinuation { continuation in
-                    PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-                        continuation.resume(returning: status)
-                    }
+                let asset = AVURLAsset(url: file)
+                guard FileManager.default.fileExists(atPath: file.path),
+                      try await asset.load(.isPlayable),
+                      !(try await asset.loadTracks(withMediaType: .video)).isEmpty else {
+                    throw PhotoExportError.invalidVideo
                 }
+                SessionLog.shared.write("Photos save video validated", always: true)
+                let authorization = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+                SessionLog.shared.write("Photos save authorization=\(authorization.rawValue)", always: true)
                 guard authorization == .authorized || authorization == .limited else {
                     throw PhotoExportError.accessDenied
                 }
-                try await PHPhotoLibrary.shared().performChanges {
-                    _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: file)
-                }
+                try await PhotoLibraryWriter.saveVideo(file)
                 info = "Video salvato nel rullino Foto."
                 SessionLog.shared.write("Photos save succeeded type=\(file.pathExtension.lowercased())", always: true)
             } catch {
@@ -986,15 +1004,18 @@ struct StudioView: View {
     private var voiceCard: some View {
         VStack(alignment: .leading, spacing: 11) {
             Label("Voce Magpie", systemImage: "waveform.badge.mic").font(.headline)
-            TextField("Testo da pronunciare", text: $voiceText, axis: .vertical)
-                .focused($voiceTextFocused)
-                .toolbar {
-                    ToolbarItemGroup(placement: .keyboard) {
-                        Spacer()
-                        Button("Fine") { voiceTextFocused = false }
-                    }
+            VStack(alignment: .trailing, spacing: 6) {
+                TextField("Testo da pronunciare", text: $voiceText, axis: .vertical)
+                    .focused($voiceTextFocused)
+                    .lineLimit(2...5)
+                if voiceTextFocused {
+                    Button("Fine") { voiceTextFocused = false }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(StudioStyle.accent)
                 }
-                .lineLimit(2...5).padding(10).background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 11))
+            }
+            .padding(10)
+            .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 11))
             Picker("Voce", selection: $voice) {
                 ForEach(["John", "Sofia", "Jason", "Aria", "Leo"], id: \.self) { Text($0).tag($0) }
             }
