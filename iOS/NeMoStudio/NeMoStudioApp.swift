@@ -160,14 +160,45 @@ private struct ImportedMovie: Transferable {
 }
 
 private enum StudioMode: String, CaseIterable, Identifiable {
-    case transcription = "Trascrizione"
-    case subtitles = "Sottotitoli"
-    case softSubtitles = "Video + traccia"
-    case burnIn = "Video impresso"
-    case dubbing = "Doppiaggio"
-    case complete = "Tutto"
+    case transcription = "Solo trascrizione"
+    case subtitles = "File sottotitoli"
+    case softSubtitles = "Video con tracce selezionabili"
+    case burnIn = "Video con sottotitoli originali"
+    case burnTranslated = "Video con sottotitoli tradotti"
+    case translatedVideo = "Video tradotto senza sottotitoli"
+    case dubbing = "Doppiaggio con audio selezionabile"
+    case complete = "Tutti i formati"
+
     var id: String { rawValue }
-    var needsVideo: Bool { self == .softSubtitles || self == .burnIn || self == .complete }
+    static let videoChoices: [StudioMode] = [.burnIn, .burnTranslated, .translatedVideo]
+    static let otherChoices: [StudioMode] = [.transcription, .subtitles, .softSubtitles, .dubbing, .complete]
+    var needsVideo: Bool {
+        switch self {
+        case .softSubtitles, .burnIn, .burnTranslated, .translatedVideo, .complete: true
+        default: false
+        }
+    }
+    var requiresTranslation: Bool { self == .burnTranslated || self == .translatedVideo }
+    var symbol: String {
+        switch self {
+        case .burnIn: "captions.bubble.fill"
+        case .burnTranslated: "character.bubble.fill"
+        case .translatedVideo: "waveform"
+        default: "doc.on.doc"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .burnIn: "Audio originale e sottotitoli impressi in lingua originale."
+        case .burnTranslated: "Audio originale e sottotitoli tradotti impressi nel video."
+        case .translatedVideo: "Solo audio tradotto, senza voce originale né sottotitoli."
+        case .softSubtitles: "MKV H.264/HEVC con tracce sottotitoli attivabili."
+        case .dubbing: "MOV con audio originale e doppiato selezionabili."
+        case .complete: "Trascrizioni, sottotitoli, MKV, MP4 e doppiaggio."
+        case .subtitles: "File SRT, VTT e ASS separati dal video."
+        case .transcription: "File TXT e JSON con il testo riconosciuto."
+        }
+    }
 }
 
 struct StudioView: View {
