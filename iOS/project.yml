@@ -9,6 +9,9 @@ packages:
     revision: 231f8eb9f0971fee335fef49f42d2975e4fbf8bc
   LlamaRuntime:
     path: Packages/LlamaRuntime
+  MLXSwift:
+    url: https://github.com/ml-explore/mlx-swift
+    from: 0.31.4
 settings:
   base:
     # Swift 6 language mode; the stable Xcode 26.6 toolchain compiles with Swift 6.3.
@@ -39,7 +42,7 @@ targets:
         product: SpeechVAD
       - package: SpeechSwift
         product: MagpieTTS
-      - package: mlx-swift
+      - package: MLXSwift
         product: MLX
       - package: LlamaRuntime
     settings:
