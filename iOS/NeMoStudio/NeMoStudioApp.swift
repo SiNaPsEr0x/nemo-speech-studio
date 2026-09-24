@@ -118,7 +118,7 @@ private enum StudioMode: String, CaseIterable, Identifiable {
     case dubbing = "Doppiaggio"
     case complete = "Tutto"
     var id: String { rawValue }
-    var available: Bool { self == .transcription || self == .subtitles }
+    var available: Bool { self == .transcription || self == .subtitles || self == .dubbing }
 }
 
 struct StudioView: View {
@@ -292,11 +292,15 @@ struct StudioView: View {
                 feature("Parlanti", "person.2.wave.2")
                 feature("Traduci", "character.book.closed")
             }
-            Text(mode.available ? "Nemotron 3.5, Sortformer e Riva elaborano sul dispositivo. I modelli vanno scaricati una sola volta." : "Questo preset richiede ancora produzione video iOS: non produce risultati simulati.")
+            Text(mode == .dubbing
+                 ? "WAV dei parlanti; per MP4/MOV compatibili creo anche un MOV con audio originale e doppiaggio selezionabili."
+                 : (mode.available
+                    ? "Nemotron 3.5, Sortformer e Riva elaborano sul dispositivo. I modelli vanno scaricati una sola volta."
+                    : "Questo preset richiede ancora produzione video iOS: non produce risultati simulati."))
                 .font(.caption).foregroundStyle(StudioStyle.muted)
             Button(working ? "Elaborazione in corso" : "Avvia elaborazione") { start() }
                 .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
-                .disabled(working || importing || !library.ready || selectedFile == nil || !mode.available || (translate && language == "auto"))
+                .disabled(working || importing || !library.ready || selectedFile == nil || !mode.available || ((translate || mode == .dubbing) && language == "auto"))
                 .frame(maxWidth: .infinity)
             if working { Button("Stop elaborazione") { job?.cancel() }.foregroundStyle(.orange) }
             if !status.isEmpty { Text(status).font(.caption).foregroundStyle(StudioStyle.accent) }
@@ -365,12 +369,14 @@ struct StudioView: View {
         let selectedTarget = translate && targetLanguage != String(language.prefix(2)) ? targetLanguage : nil
         let useDiarization = diarization
         let makeSubtitles = mode == .subtitles
+        let makeDubbing = mode == .dubbing
         job = Task {
             do {
                 let worker = Task.detached(priority: .userInitiated) {
                     try await StudioPipeline.process(source: selectedFile, language: selectedLanguage,
                                                      targetLanguage: selectedTarget,
-                                                     diarization: useDiarization, subtitles: makeSubtitles) { phase in
+                                                     diarization: useDiarization, subtitles: makeSubtitles,
+                                                     dubbing: makeDubbing) { phase in
                         Task { @MainActor in self.status = phase }
                     }
                 }
@@ -380,7 +386,9 @@ struct StudioView: View {
                 lines = result.lines
                 translated = result.translated
                 files = result.files
-                status = "Completato: \(result.files.count) file pronti"
+                status = result.warnings.isEmpty
+                    ? "Completato: \(result.files.count) file pronti"
+                    : "Completato con avviso: \(result.warnings.joined(separator: " "))"
             } catch is CancellationError {
                 status = "Interrotto"
             } catch {

@@ -59,6 +59,14 @@ final class ModelLibrary: ObservableObject {
         try HuggingFaceDownloader.getCacheDirectory(for: modelId)
     }
 
+    private func reportProgress(base: Double, weight: Double) -> @Sendable (Double) -> Void {
+        { [weak self] value in
+            Task { @MainActor [weak self] in
+                self?.fraction = base + weight * value
+            }
+        }
+    }
+
     func downloadAll() {
         guard !downloading else { return }
         downloading = true
@@ -74,7 +82,7 @@ final class ModelLibrary: ObservableObject {
                     additionalFiles: ["encoder.mlmodelc/**", "decoder.mlmodelc/**", "joint.mlmodelc/**",
                                       "vocab.json", "tokenizer.model", "*_tokenizer.model",
                                       "vocab.txt", "languages.json", "config.json"],
-                    progressHandler: { value in Task { @MainActor in self.fraction = 0.25 * value } })
+                    progressHandler: reportProgress(base: 0, weight: 0.25))
                 try Task.checkCancellation()
                 status = "Sortformer: download/resume + verifica SHA"
                 let sortID = SortformerDiarizer.defaultModelId
@@ -82,17 +90,14 @@ final class ModelLibrary: ObservableObject {
                 try await HuggingFaceDownloader.downloadWeights(
                     modelId: sortID, to: sortPath,
                     additionalFiles: ["Sortformer.mlmodelc/**", "config.json"],
-                    progressHandler: { value in Task { @MainActor in self.fraction = 0.25 + 0.25 * value } })
+                    progressHandler: reportProgress(base: 0.25, weight: 0.25))
                 try Task.checkCancellation()
                 status = "Magpie + NanoCodec: download/resume + verifica SHA"
-                _ = try await MagpieTTSDownloader.ensureDownloaded(variant: .int8) { value in
-                    Task { @MainActor in self.fraction = 0.50 + 0.25 * value }
-                }
+                _ = try await MagpieTTSDownloader.ensureDownloaded(
+                    variant: .int8, progressHandler: reportProgress(base: 0.50, weight: 0.25))
                 try Task.checkCancellation()
                 status = "Riva Translate Q4_K_M: download/resume + SHA-256"
-                try await Self.downloadRiva { value in
-                    Task { @MainActor in self.fraction = 0.75 + 0.25 * value }
-                }
+                try await Self.downloadRiva(progress: reportProgress(base: 0.75, weight: 0.25))
                 try ("Riva SHA-256: " + Self.rivaHash).write(
                     to: Self.verifiedMarker, atomically: true, encoding: .utf8)
                 fraction = 1
@@ -113,7 +118,7 @@ final class ModelLibrary: ObservableObject {
 
     func stop() { work?.cancel() }
 
-    private static func downloadRiva(progress: @escaping (Double) -> Void) async throws {
+    private static func downloadRiva(progress: @escaping @Sendable (Double) -> Void) async throws {
         let final = rivaPath
         if FileManager.default.fileExists(atPath: final.path),
            try sha256(final) == rivaHash { return }

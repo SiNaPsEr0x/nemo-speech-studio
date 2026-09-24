@@ -17,6 +17,7 @@ struct StudioResult: Sendable {
     var lines: [StudioLine]
     var translated: [StudioLine]
     var files: [URL]
+    var warnings: [String]
 }
 
 enum StudioPipelineError: LocalizedError {
@@ -40,6 +41,7 @@ enum StudioPipeline {
         targetLanguage: String?,
         diarization: Bool,
         subtitles: Bool,
+        dubbing: Bool,
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> StudioResult {
         progress("Preparo la traccia audio")
@@ -109,6 +111,7 @@ enum StudioPipeline {
             isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var files = try writeTranscripts(lines, to: directory)
+        var warnings: [String] = []
         if subtitles {
             files += try writeSubtitles(lines, to: directory)
         }
@@ -116,8 +119,36 @@ enum StudioPipeline {
             files += try writeTranscripts(translated, to: directory, suffix: "-tradotta")
             if subtitles { files += try writeSubtitles(translated, to: directory, suffix: "-tradotti") }
         }
+        if dubbing {
+            try Task.checkCancellation()
+            progress("Preparo il doppiaggio Magpie + NanoCodec")
+            let voiceLines = translated.isEmpty ? lines : translated
+            let voiceLanguage = targetLanguage ?? language
+            let dubbedWAV = try await dub(voiceLines, language: voiceLanguage,
+                                          to: directory, progress: progress)
+            files.append(dubbedWAV)
+            if try await MediaComposer.hasVideo(source) {
+                try Task.checkCancellation()
+                progress("Creo MOV con audio originale + doppiaggio separato")
+                let video = directory.appendingPathComponent("video-doppiato.mov")
+                do {
+                    try await MediaComposer.muxOriginalAndDubbing(
+                        video: source, dubbing: dubbedWAV, output: video)
+                    files.append(video)
+                } catch is CancellationError {
+                    try? FileManager.default.removeItem(at: video)
+                    throw CancellationError()
+                } catch {
+                    try? FileManager.default.removeItem(at: video)
+                    let warning = "MOV non disponibile: \(error.localizedDescription). WAV pronto."
+                    SessionLog.shared.write(warning, always: true)
+                    warnings.append(warning)
+                }
+            }
+        }
         progress("Pronto")
-        return StudioResult(lines: lines, translated: translated, files: files)
+        return StudioResult(lines: lines, translated: translated, files: files,
+                            warnings: warnings)
     }
 
     static func synthesize(_ text: String, voice: String, language: String) async throws -> URL {
@@ -132,6 +163,84 @@ enum StudioPipeline {
             params: MagpieTTSParams(temperature: 0, topK: 1, maxSteps: 500))
         let url = AppStoragePaths.output.appendingPathComponent("magpie-\(UUID().uuidString.prefix(8)).wav")
         try writeWAV(samples, at: url, sampleRate: Double(MagpieTTS.sampleRate))
+        return url
+    }
+
+    // Mix overlapping speakers on a bounded sliding buffer; only completed
+    // samples are written to disk, even for hour-long source videos.
+    private static func dub(_ lines: [StudioLine], language: String, to directory: URL,
+                            progress: @escaping @Sendable (String) -> Void) async throws -> URL {
+        guard let speechLanguage = MagpieLanguage(code: String(language.prefix(2))) else {
+            throw StudioPipelineError.unsupportedFormat
+        }
+        let model = try await MagpieTTS.fromPretrained(variant: .int8)
+        let sampleRate = MagpieTTS.sampleRate
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                         sampleRate: Double(sampleRate), channels: 1,
+                                         interleaved: false) else { throw StudioPipelineError.noAudio }
+        let url = directory.appendingPathComponent("doppiaggio.wav")
+        let file = try AVAudioFile(forWriting: url, settings: format.settings,
+                                   commonFormat: .pcmFormatFloat32, interleaved: false)
+        var pending: [Float] = []
+        var cursor = 0
+        func emit(_ count: Int) throws {
+            var written = 0
+            while written < count {
+                let length = min(16_384, count - written)
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                                    frameCapacity: AVAudioFrameCount(length)),
+                      let destination = buffer.floatChannelData?[0] else {
+                    throw StudioPipelineError.noAudio
+                }
+                for j in 0..<length { destination[j] = max(-1, min(1, pending[written + j])) }
+                buffer.frameLength = AVAudioFrameCount(length)
+                try file.write(from: buffer)
+                written += length
+            }
+            pending.removeFirst(count)
+            cursor += count
+        }
+        func silence(until frame: Int) throws {
+            while cursor < frame {
+                let length = min(16_384, frame - cursor)
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                                    frameCapacity: AVAudioFrameCount(length)),
+                      let destination = buffer.floatChannelData?[0] else {
+                    throw StudioPipelineError.noAudio
+                }
+                buffer.frameLength = AVAudioFrameCount(length)
+                for j in 0..<length { destination[j] = 0 }
+                try file.write(from: buffer)
+                cursor += length
+            }
+        }
+        let voices: [MagpieSpeaker] = [.johnVanStan, .sofia, .jason, .aria]
+        for (index, line) in lines.enumerated() {
+            try Task.checkCancellation()
+            let start = max(0, Int((line.start * Double(sampleRate)).rounded()))
+            if start > cursor + pending.count {
+                try emit(pending.count)
+                try silence(until: start)
+            }
+            progress("Sintetizzo la voce: \(index + 1)/\(lines.count)")
+            let voice = voices[max(0, min(3, line.speaker - 1))]
+            let samples = try model.synthesize(
+                text: line.text, speaker: voice, language: speechLanguage,
+                params: MagpieTTSParams(temperature: 0, topK: 1, maxSteps: 500))
+            let offset = max(0, start - cursor)
+            if offset + samples.count > pending.count {
+                pending.append(contentsOf: repeatElement(Float(0), count: offset + samples.count - pending.count))
+            }
+            for j in samples.indices { pending[offset + j] += samples[j] }
+            let nextStart = index + 1 < lines.count
+                ? max(0, Int((lines[index + 1].start * Double(sampleRate)).rounded()))
+                : cursor + pending.count
+            try emit(min(pending.count, max(0, nextStart - cursor)))
+        }
+        try emit(pending.count)
+        if let last = lines.last {
+            try silence(until: max(cursor, Int((last.end * Double(sampleRate)).rounded())))
+        }
         return url
     }
 
