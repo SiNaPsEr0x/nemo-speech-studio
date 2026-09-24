@@ -31,7 +31,7 @@ struct MKVSmoke {
                 let count = CMSampleBufferGetNumSamples(sample)
                 let size = count > 0 ? CMSampleBufferGetSampleSize(sample, at: 0) : 0
                 let codec = CMSampleBufferGetFormatDescription(sample).map(CMFormatDescriptionGetMediaSubType)
-                print("Sample output=\(output.mediaType.rawValue) index=\(index) count=\(count) size=\(size) data=\(CMSampleBufferGetDataBuffer(sample) != nil) image=\(CMSampleBufferGetImageBuffer(sample) != nil) codec=\(String(describing: codec))")
+                FileHandle.standardError.write(Data("Sample output=\(output.mediaType.rawValue) index=\(index) count=\(count) size=\(size) data=\(CMSampleBufferGetDataBuffer(sample) != nil) image=\(CMSampleBufferGetImageBuffer(sample) != nil) codec=\(String(describing: codec))\\n".utf8))
             }
         }
         reader.cancelReading()
