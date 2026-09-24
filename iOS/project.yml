@@ -27,6 +27,7 @@ targets:
       path: NeMoStudio/Info.plist
       properties:
         CFBundleDisplayName: NeMo Studio
+        NSPhotoLibraryAddUsageDescription: "NeMo Studio salva nel rullino i video che scegli di esportare."
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UILaunchScreen: {}
