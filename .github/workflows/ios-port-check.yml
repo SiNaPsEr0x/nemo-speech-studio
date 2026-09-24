@@ -41,7 +41,7 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/nemo-derived" \
             -skipPackagePluginValidation -skipMacroValidation \
             MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
-            CODE_SIGNING_ALLOWED=NO MTL_LANGUAGE_REVISION=Metal32 build \
+            CODE_SIGNING_ALLOWED=NO MTL_COMPILER_FLAGS=-Wno-c++17-extensions build \
             2>&1 | tee "$RUNNER_TEMP/nemo-xcodebuild.log"
           if grep -nE 'warning:' "$RUNNER_TEMP/nemo-xcodebuild.log"; then
             echo '::error::La compilazione ha prodotto warning; correggerli prima di pubblicare.'
