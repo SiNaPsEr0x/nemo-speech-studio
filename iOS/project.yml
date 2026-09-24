@@ -39,6 +39,8 @@ targets:
         product: SpeechVAD
       - package: SpeechSwift
         product: MagpieTTS
+      - package: mlx-swift
+        product: MLX
       - package: LlamaRuntime
     settings:
       base:
