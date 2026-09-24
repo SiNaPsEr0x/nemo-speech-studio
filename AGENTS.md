@@ -12,6 +12,7 @@
 
 - La sola Action iOS (`.github/workflows/ios-port-check.yml`) usa esclusivamente `workflow_dispatch`: nessun `push`, `pull_request` o altro trigger automatico. Completa e controlla prima tutte le modifiche; poi avvia manualmente la build da GitHub Actions quando appropriato. La build riuscita aggiorna l'unica Release `ios-current` con un solo asset IPA unsigned.
 - Per iOS esamina anche `iOS/README.md` e il codice Swift interessato, risolvi i warning alla fonte, conserva import da File e Foto. Verifica con campioni reali H.264 e H.265/HEVC, audio AAC e tracce sottotitoli selezionabili nell'MKV; prova le funzioni su iPhone prima di descriverle come funzionanti su dispositivo.
+- MagpieTTS iOS: non forzare il greedy decoding `temperature: 0, topK: 1` nei percorsi Voce/doppiaggio. La revisione `speech-swift` bloccata dal progetto documenta lo stallo dell'italiano in greedy; usa `temperature: 0.6`, `topK: 80`, `maxSteps: 500` in entrambi i percorsi salvo nuova verifica upstream e test reali.
 
 - Nel tab Studio mantieni tre scelte video esplicite: MP4 con sottotitoli originali impressi e audio originale, MP4 con sottotitoli tradotti impressi e audio originale, MP4 doppiato nella lingua scelta con una sola traccia audio e senza sottotitoli. I pulsanti di importazione File e Foto hanno dimensioni uniformi; importando un video il preset predefinito passa a sottotitoli originali. Per queste scelte l'export video deve fallire visibilmente se non riesce, senza limitarsi a TXT/SRT. Priorità ai file video nella tab Risultati.
 
