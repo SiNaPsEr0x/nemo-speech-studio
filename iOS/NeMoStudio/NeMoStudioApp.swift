@@ -316,7 +316,7 @@ struct StudioView: View {
             Image(systemName: "cpu").foregroundStyle(StudioStyle.accent)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Nemotron 3.5 + Sortformer + Riva + Magpie").font(.subheadline.bold())
-                Text("Modelli NVIDIA sul dispositivo: ASR Core ML, Riva GGUF/Metal e TTS MLX. Il mux video non è ancora disponibile.")
+                Text("Modelli NVIDIA sul dispositivo: ASR Core ML, Riva GGUF/Metal e TTS MLX. Video MOV/MP4 compatibili; MKV ancora da integrare.")
                     .font(.caption).foregroundStyle(StudioStyle.muted)
             }
             if !lines.isEmpty {
