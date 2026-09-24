@@ -2,7 +2,11 @@ name: NeMoStudio
 options:
   bundleIdPrefix: io.github.sinapser0x
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "18.0"
+packages:
+  SpeechSwift:
+    url: https://github.com/soniqo/speech-swift.git
+    revision: 231f8eb9f0971fee335fef49f42d2975e4fbf8bc
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -13,6 +17,15 @@ targets:
     platform: iOS
     sources:
       - path: NeMoStudio
+    dependencies:
+      - package: SpeechSwift
+        product: AudioCommon
+      - package: SpeechSwift
+        product: NemotronStreamingASR
+      - package: SpeechSwift
+        product: SpeechVAD
+      - package: SpeechSwift
+        product: MagpieTTS
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.sinapser0x.nemostudio
