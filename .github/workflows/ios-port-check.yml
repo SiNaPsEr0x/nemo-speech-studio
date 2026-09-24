@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ios-port-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-latest
@@ -31,4 +35,5 @@ jobs:
         run: |
           xcodebuild -project NeMoStudio.xcodeproj -scheme NeMoStudio \
             -destination 'generic/platform=iOS' -configuration Release \
+            -skipPackagePluginValidation -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO build
