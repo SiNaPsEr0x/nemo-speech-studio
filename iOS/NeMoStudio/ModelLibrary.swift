@@ -18,6 +18,40 @@ enum ModelStorageError: LocalizedError {
     }
 }
 
+enum RivaQuality: String, CaseIterable, Identifiable {
+    case q4 = "Q4_K_M", q5 = "Q5_K_M", q6 = "Q6_K", q8 = "Q8_0"
+    var id: String { rawValue }
+    var file: String { "Riva-Translate-4B-Instruct-v2-\(rawValue).gguf" }
+    var path: URL { AppStoragePaths.models.appendingPathComponent(file) }
+    var url: URL {
+        URL(string: "https://huggingface.co/liodon-ai/Riva-Translate-4B-Instruct-v2-imatrix-GGUF/resolve/main/\(file)?download=true")!
+    }
+    var hash: String {
+        switch self {
+        case .q4: "90c2f48ff5549b770d9aaecb7eea603548bcca035a970a800d9c17781991804d"
+        case .q5: "14f6926b8044b4b3e049266df4158815259c62b5342d10fad63b84a518c13dde"
+        case .q6: "35a3b9d87b1b53aefab92b871f0b78dacd10716caa392e2bef682646aec122e3"
+        case .q8: "924b01c1b17ea592b46cf555c56c00b623f67bf6b0b99bd1653428c2ea595ad0"
+        }
+    }
+    var sizeGB: String {
+        switch self {
+        case .q4: "2,76"
+        case .q5: "3,14"
+        case .q6: "3,66"
+        case .q8: "4,45"
+        }
+    }
+    var description: String {
+        switch self {
+        case .q4: "Equilibrato e già provato su iPhone 17 Pro"
+        case .q5: "Più precisione, maggiore uso della memoria"
+        case .q6: "Qualità vicina al modello pieno"
+        case .q8: "Qualità massima; da provare su questo iPhone"
+        }
+    }
+}
+
 struct ModelPresence: Identifiable {
     let id: String
     let name: String
@@ -34,15 +68,39 @@ final class ModelLibrary: ObservableObject {
     @Published private(set) var models: [ModelPresence] = []
     private var work: Task<Void, Never>?
     private var lastProgressBucket = -1
+    @Published private(set) var selectedRiva: RivaQuality =
+        RivaQuality(rawValue: UserDefaults.standard.string(forKey: "selectedRivaQuality") ?? "") ?? .q4
+
+    var memoryGB: Int { Int(ProcessInfo.processInfo.physicalMemory / 1_073_741_824) }
+    var recommendedRiva: RivaQuality {
+        if memoryGB >= 12 { return .q6 }
+        if memoryGB >= 8 { return .q5 }
+        return .q4
+    }
+    var availableStorage: String {
+        let bytes = (try? AppStoragePaths.models.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
+        guard let bytes else { return "Spazio non disponibile" }
+        let format = ByteCountFormatter()
+        format.countStyle = .file
+        return "Spazio libero: \(format.string(fromByteCount: bytes))"
+    }
+    func select(_ quality: RivaQuality) {
+        guard !downloading else { return }
+        selectedRiva = quality
+        UserDefaults.standard.set(quality.rawValue, forKey: "selectedRivaQuality")
+        refreshPresence()
+        SessionLog.shared.write("Riva selected quality=\(quality.rawValue) RAM=\(memoryGB)GiB", always: true)
+    }
 
     init() {
         refreshPresence()
     }
 
-    nonisolated static let rivaFile = "Riva-Translate-4B-Instruct-v2-Q4_K_M.gguf"
-    static let rivaHash = "90c2f48ff5549b770d9aaecb7eea603548bcca035a970a800d9c17781991804d"
-    static let rivaURL = URL(string: "https://huggingface.co/liodon-ai/Riva-Translate-4B-Instruct-v2-imatrix-GGUF/resolve/main/Riva-Translate-4B-Instruct-v2-Q4_K_M.gguf?download=true")!
-    nonisolated static let rivaPath = AppStoragePaths.models.appendingPathComponent(rivaFile)
+    nonisolated static var rivaPath: URL {
+        let quality = RivaQuality(rawValue: UserDefaults.standard.string(forKey: "selectedRivaQuality") ?? "") ?? .q4
+        return quality.path
+    }
     static let verifiedMarker = AppStoragePaths.models.appendingPathComponent("models-verified-v1.txt")
 
     private func refreshPresence() {
@@ -53,14 +111,14 @@ final class ModelLibrary: ObservableObject {
             ("nemotron", "Nemotron 3.5", asr?.appendingPathComponent("encoder.mlmodelc")),
             ("sortformer", "Sortformer", sort?.appendingPathComponent("Sortformer.mlmodelc")),
             ("magpie", "Magpie", magpie?.appendingPathComponent("nanocodec_decoder/model.safetensors")),
-            ("riva", "Riva 4B", Self.rivaPath)
+            ("riva", "Riva 4B \(selectedRiva.rawValue)", selectedRiva.path)
         ]
         models = files.map { id, name, file in
             ModelPresence(id: id, name: name,
                           installed: file.map { FileManager.default.fileExists(atPath: $0.path) } ?? false)
         }
-        ready = FileManager.default.fileExists(atPath: Self.verifiedMarker.path)
-            && models.allSatisfy(\.installed)
+        let marker = try? String(contentsOf: Self.verifiedMarker, encoding: .utf8)
+        ready = marker == "Riva SHA-256: \(selectedRiva.hash)" && models.allSatisfy(\.installed)
         if !downloading {
             status = ready ? "Tutti i modelli sono già sul tuo iPhone" : "Scarica i modelli mancanti per iniziare"
         }
@@ -93,14 +151,19 @@ final class ModelLibrary: ObservableObject {
         }
     }
 
-    func downloadAll() {
+    func downloadAll() { download(ids: ["nemotron", "sortformer", "magpie", "riva"]) }
+
+    func downloadModel(_ id: String) { download(ids: [id]) }
+
+    private func download(ids: Set<String>) {
         guard !downloading else { return }
         downloading = true
-        ready = false
-        SessionLog.shared.write("Model download started; available space checked before each large transfer", always: true)
+        let quality = selectedRiva
+        SessionLog.shared.write("Model download started ids=\(ids.sorted()) riva=\(quality.rawValue)", always: true)
         work = Task {
             do {
                 try Self.ensureSpace(512 * 1024 * 1024)
+                if ids.contains("nemotron") {
                 let asrID = NemotronStreamingASRModel.defaultModelId
                 status = "Nemotron 3.5: download/resume + verifica SHA"
                 lastProgressBucket = -1
@@ -114,7 +177,9 @@ final class ModelLibrary: ObservableObject {
                     progressHandler: reportProgress(base: 0, weight: 0.25, model: "Nemotron"))
                 refreshPresence()
                 SessionLog.shared.write("ASR download verified")
+                }
                 try Task.checkCancellation()
+                if ids.contains("sortformer") {
                 status = "Sortformer: download/resume + verifica SHA"
                 lastProgressBucket = -1
                 let sortID = SortformerDiarizer.defaultModelId
@@ -125,20 +190,32 @@ final class ModelLibrary: ObservableObject {
                     progressHandler: reportProgress(base: 0.25, weight: 0.25, model: "Sortformer"))
                 refreshPresence()
                 SessionLog.shared.write("Sortformer download verified")
+                }
                 try Task.checkCancellation()
+                if ids.contains("magpie") {
                 status = "Magpie + NanoCodec: download/resume + verifica SHA"
                 lastProgressBucket = -1
                 _ = try await MagpieTTSDownloader.ensureDownloaded(
                     variant: .int8, progressHandler: reportProgress(base: 0.50, weight: 0.25, model: "Magpie"))
                 refreshPresence()
                 SessionLog.shared.write("Magpie/NanoCodec download verified")
+                }
                 try Task.checkCancellation()
-                status = "Riva Translate Q4_K_M: download/resume + SHA-256"
+                if ids.contains("riva") {
+                status = "Riva Translate \(quality.rawValue): download/resume + SHA-256"
                 lastProgressBucket = -1
-                try await Self.downloadRiva(progress: reportProgress(base: 0.75, weight: 0.25, model: "Riva"))
+                try await Self.downloadRiva(quality, progress: reportProgress(base: 0.75, weight: 0.25, model: "Riva"))
+                }
                 refreshPresence()
-                try ("Riva SHA-256: " + Self.rivaHash).write(
-                    to: Self.verifiedMarker, atomically: true, encoding: .utf8)
+                if models.allSatisfy(\.installed) {
+                    // Check the selected file even when it was installed in an older session.
+                    guard try Self.sha256(quality.path) == quality.hash else {
+                        throw DownloadError.checksumMismatch(file: quality.file, expected: quality.hash,
+                                                              actual: try Self.sha256(quality.path))
+                    }
+                    try ("Riva SHA-256: " + quality.hash).write(
+                        to: Self.verifiedMarker, atomically: true, encoding: .utf8)
+                }
                 fraction = 1
                 refreshPresence()
                 status = "Modelli pronti sul dispositivo"
@@ -160,10 +237,32 @@ final class ModelLibrary: ObservableObject {
         work?.cancel()
     }
 
-    private static func downloadRiva(progress: @escaping @Sendable (Double) -> Void) async throws {
-        let final = rivaPath
+    func deleteModel(_ id: String) throws {
+        guard !downloading else { return }
+        let destination: URL
+        switch id {
+        case "nemotron": destination = try Self.modelDirectory(NemotronStreamingASRModel.defaultModelId)
+        case "sortformer": destination = try Self.modelDirectory(SortformerDiarizer.defaultModelId)
+        case "magpie": destination = try Self.modelDirectory(MagpieTTSVariant.int8.huggingFaceRepoId)
+        case "riva": destination = selectedRiva.path
+        default: return
+        }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        if id == "riva" {
+            let partial = destination.appendingPathExtension("part")
+            if FileManager.default.fileExists(atPath: partial.path) { try FileManager.default.removeItem(at: partial) }
+        }
+        try? FileManager.default.removeItem(at: Self.verifiedMarker)
+        refreshPresence()
+        SessionLog.shared.write("Model removed id=\(id) name=\(destination.lastPathComponent)", always: true)
+    }
+
+    private static func downloadRiva(_ quality: RivaQuality, progress: @escaping @Sendable (Double) -> Void) async throws {
+        let final = quality.path
         if FileManager.default.fileExists(atPath: final.path),
-           try sha256(final) == rivaHash {
+           try sha256(final) == quality.hash {
             SessionLog.shared.write("Riva cache SHA-256 verified; skipping download")
             return
         }
@@ -175,7 +274,7 @@ final class ModelLibrary: ObservableObject {
             try Task.checkCancellation()
             try ensureSpace(256 * 1024 * 1024)
             let end = offset + 8 * 1024 * 1024 - 1
-            var request = URLRequest(url: rivaURL)
+            var request = URLRequest(url: quality.url)
             request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
             let (tempURL, response) = try await URLSession.shared.download(for: request)
             guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
@@ -233,10 +332,10 @@ final class ModelLibrary: ObservableObject {
             }
         } while total.map { offset < $0 } ?? true
         let actual = try sha256(part)
-        SessionLog.shared.write("Riva SHA-256 expected=\(rivaHash) actual=\(actual)")
-        guard actual == rivaHash else {
+        SessionLog.shared.write("Riva SHA-256 expected=\(quality.hash) actual=\(actual)")
+        guard actual == quality.hash else {
             try FileManager.default.removeItem(at: part)
-            throw DownloadError.checksumMismatch(file: rivaFile, expected: rivaHash, actual: actual)
+            throw DownloadError.checksumMismatch(file: quality.file, expected: quality.hash, actual: actual)
         }
         if FileManager.default.fileExists(atPath: final.path) { try FileManager.default.removeItem(at: final) }
         try FileManager.default.moveItem(at: part, to: final)
