@@ -60,6 +60,46 @@ enum MediaComposer {
         try await exporter.export(to: output, as: .mov)
     }
 
+    // Export a finished video with the synthesized translation as its only audio track.
+    // The MP4 preset encodes the WAV voice as compatible audio; no source audio is copied.
+    static func muxTranslatedOnly(video: URL, dubbing: URL, output: URL) async throws {
+        let asset = AVURLAsset(url: video)
+        let voice = AVURLAsset(url: dubbing)
+        guard let sourceVideo = try await asset.loadTracks(withMediaType: .video).first,
+              let voiceTrack = try await voice.loadTracks(withMediaType: .audio).first else {
+            throw MediaComposerError.unsupported
+        }
+        let duration = try await asset.load(.duration)
+        let voiceDuration = try await voice.load(.duration)
+        let voiceRange = CMTimeRange(start: .zero, duration: CMTimeMinimum(duration, voiceDuration))
+        guard CMTimeCompare(voiceRange.duration, .zero) > 0 else {
+            throw MediaComposerError.unsupported
+        }
+        let composition = AVMutableComposition()
+        guard let picture = composition.addMutableTrack(withMediaType: .video,
+                                                         preferredTrackID: kCMPersistentTrackID_Invalid),
+              let translatedVoice = composition.addMutableTrack(withMediaType: .audio,
+                                                                  preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw MediaComposerError.unsupported
+        }
+        try picture.insertTimeRange(CMTimeRange(start: .zero, duration: duration),
+                                    of: sourceVideo, at: .zero)
+        picture.preferredTransform = try await sourceVideo.load(.preferredTransform)
+        try translatedVoice.insertTimeRange(voiceRange, of: voiceTrack, at: .zero)
+        let exporter = AVAssetExportSession(asset: composition,
+                                             presetName: AVAssetExportPresetHighestQuality)
+        guard let exporter, exporter.supportedFileTypes.contains(.mp4) else {
+            throw MediaComposerError.unsupported
+        }
+        try await exporter.export(to: output, as: .mp4)
+        let finished = AVURLAsset(url: output)
+        guard try await finished.loadTracks(withMediaType: .video).count == 1,
+              try await finished.loadTracks(withMediaType: .audio).count == 1 else {
+            try? FileManager.default.removeItem(at: output)
+            throw MediaComposerError.unsupported
+        }
+    }
+
     static func burnSubtitles(video: URL, lines: [StudioLine], output: URL) async throws {
         let asset = AVURLAsset(url: video)
         guard !(try await asset.loadTracks(withMediaType: .video)).isEmpty,
