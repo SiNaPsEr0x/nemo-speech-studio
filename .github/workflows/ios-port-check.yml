@@ -51,6 +51,10 @@ jobs:
           test -s "$RUNNER_TEMP/NeMoStudio-unsigned.ipa"
           unzip -tq "$RUNNER_TEMP/NeMoStudio-unsigned.ipa"
           test -f "$RUNNER_TEMP/nemo-ipa/Payload/NeMoStudio.app/Info.plist"
+          test -f "$RUNNER_TEMP/nemo-ipa/Payload/NeMoStudio.app/Assets.car"
+          plutil -extract UILaunchScreen xml1 -o - "$RUNNER_TEMP/nemo-ipa/Payload/NeMoStudio.app/Info.plist" > /dev/null
+          test "$(plutil -extract UIFileSharingEnabled raw -o - "$RUNNER_TEMP/nemo-ipa/Payload/NeMoStudio.app/Info.plist")" = true
+          test "$(plutil -extract LSSupportsOpeningDocumentsInPlace raw -o - "$RUNNER_TEMP/nemo-ipa/Payload/NeMoStudio.app/Info.plist")" = true
       - name: Publish single iOS Release
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
@@ -66,7 +70,7 @@ jobs:
 
           L'IPA è senza firma: firmala con il tuo certificato prima di installarla su iPhone. Al primo avvio premi «Scarica / riprendi modelli»; i pesi non sono inclusi nell'IPA.
 
-          Limitazioni note: i preset «Video + traccia» (MKV soft subtitle) e «Tutto» sono disabilitati. Non sono ancora disponibili risultati di inferenza verificati su iPhone; i file/video incompatibili con AVFoundation non vengono elaborati. Per diagnosi attiva Debug nelle Impostazioni iOS e condividi session.log dall'app.
+          Limitazioni note: i preset «Video + traccia» (MKV soft subtitle) e «Tutto» sono disabilitati. Non sono ancora disponibili risultati di inferenza verificati su iPhone; i file/video incompatibili con AVFoundation non vengono elaborati. Per diagnosi attiva Debug nelle Impostazioni iOS e apri File → Sul mio iPhone → NeMo Studio → session.log.
           NOTES
           if gh release view "$tag" > /dev/null 2>&1; then
             gh release view "$tag" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/old-assets.txt"

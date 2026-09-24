@@ -27,6 +27,7 @@ enum MediaComposer {
         }
         let duration = try await asset.load(.duration)
         let voiceDuration = try await voice.load(.duration)
+        SessionLog.shared.write("MOV mux source=\(video.pathExtension.lowercased()) duration=\(CMTimeGetSeconds(duration))s voice=\(CMTimeGetSeconds(voiceDuration))s")
         let composition = AVMutableComposition()
         guard let videoTrack = composition.addMutableTrack(withMediaType: .video,
                                                              preferredTrackID: kCMPersistentTrackID_Invalid),
@@ -39,7 +40,9 @@ enum MediaComposer {
         videoTrack.preferredTransform = try await sourceVideo.load(.preferredTransform)
         let voiceRange = CMTimeRange(start: .zero, duration: CMTimeMinimum(duration, voiceDuration))
         try dubTrack.insertTimeRange(voiceRange, of: voiceTrack, at: .zero)
-        for original in try await asset.loadTracks(withMediaType: .audio) {
+        let originalTracks = try await asset.loadTracks(withMediaType: .audio)
+        SessionLog.shared.write("MOV mux original audio tracks=\(originalTracks.count)")
+        for original in originalTracks {
             guard let originalTrack = composition.addMutableTrack(withMediaType: .audio,
                                                                     preferredTrackID: kCMPersistentTrackID_Invalid) else {
                 throw MediaComposerError.unsupported
@@ -67,6 +70,7 @@ enum MediaComposer {
         let duration = try await asset.load(.duration)
         let seconds = CMTimeGetSeconds(duration)
         guard seconds > 0, seconds.isFinite else { throw MediaComposerError.unsupported }
+        SessionLog.shared.write("Burn-in MP4 duration=\(seconds)s captions=\(lines.count)")
         let composition = AVMutableVideoComposition(propertiesOf: asset)
         let size = composition.renderSize
         let parent = CALayer()

@@ -45,13 +45,17 @@ enum StudioPipeline {
         burnIn: Bool,
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> StudioResult {
+        SessionLog.shared.write("Pipeline input type=\(source.pathExtension.lowercased()) diarization=\(diarization) subtitles=\(subtitles) dubbing=\(dubbing) burnIn=\(burnIn)")
         progress("Preparo la traccia audio")
         let audio = try await prepareAudio(source)
+        SessionLog.shared.write("Audio prepared type=\(audio.pathExtension.lowercased())")
         try Task.checkCancellation()
 
         progress("Carico Nemotron 3.5 INT8")
+        let asrStarted = Date()
         let asrPath = try HuggingFaceDownloader.getCacheDirectory(for: NemotronStreamingASRModel.defaultModelId)
         let model = try await NemotronStreamingASRModel.fromLocal(bundleDir: asrPath)
+        SessionLog.shared.write("Nemotron loaded in \(Int(Date().timeIntervalSince(asrStarted)))s")
         try Task.checkCancellation()
         let session = try model.createSession(language: language == "auto" ? nil : language)
 
@@ -60,16 +64,22 @@ enum StudioPipeline {
             url: audio,
             options: AudioFileStreamOptions(targetSampleRate: 16_000, chunkDuration: 2))
         var timedWords: [TimedWord] = []
+        var audioChunks = 0
         for try await chunk in stream {
             try Task.checkCancellation()
+            audioChunks += 1
             for update in try session.pushAudio(chunk.samples) where !update.words.isEmpty {
                 timedWords = update.words
+            }
+            if audioChunks % 15 == 0 {
+                SessionLog.shared.write("ASR streaming chunks=\(audioChunks) latestWords=\(timedWords.count)")
             }
         }
         for update in try session.finalize() where !update.words.isEmpty {
             timedWords = update.words
         }
         guard !timedWords.isEmpty else { throw StudioPipelineError.noWords }
+        SessionLog.shared.write("ASR final chunks=\(audioChunks) words=\(timedWords.count)", always: true)
         // Release the ASR graph before loading the second model on the phone.
         model.unload()
 
@@ -80,6 +90,7 @@ enum StudioPipeline {
             let sortPath = try HuggingFaceDownloader.getCacheDirectory(for: SortformerDiarizer.defaultModelId)
             let diarizer = try await SortformerDiarizer.fromPretrained(
                 cacheDir: sortPath, offlineMode: true)
+            SessionLog.shared.write("Sortformer loaded from local cache")
             try Task.checkCancellation()
             progress("Riconosco i parlanti")
             let speakerSession = diarizer.makeStreamingSession()
@@ -87,24 +98,33 @@ enum StudioPipeline {
             let audioStream = AudioFileLoader.stream(
                 url: audio,
                 options: AudioFileStreamOptions(targetSampleRate: 16_000, chunkDuration: 30))
+            var diarChunks = 0
             for try await chunk in audioStream {
                 try Task.checkCancellation()
                 _ = try speakerSession.push(audio: chunk.samples)
+                diarChunks += 1
+                if diarChunks % 10 == 0 { SessionLog.shared.write("Sortformer chunks=\(diarChunks)") }
             }
             speakers = try speakerSession.finish().segments
+            SessionLog.shared.write("Sortformer final chunks=\(diarChunks) segments=\(speakers.count)", always: true)
         }
 
         let lines = makeLines(words: timedWords, speakers: speakers)
+        SessionLog.shared.write("Aligned transcript lines=\(lines.count)")
         var translated: [StudioLine] = []
         if let targetLanguage, !lines.isEmpty {
             progress("Carico Riva Translate 4B (Metal)")
             let translator = try RivaTranslator(url: ModelLibrary.rivaPath)
+            SessionLog.shared.write("Riva GGUF loaded; translating \(lines.count) lines")
             for (index, line) in lines.enumerated() {
                 try Task.checkCancellation()
                 progress("Traduco con Riva: \(index + 1)/\(lines.count)")
                 var output = line
                 output.text = try translator.translate(line.text, from: language, to: targetLanguage)
                 translated.append(output)
+                if (index + 1) % 10 == 0 || index + 1 == lines.count {
+                    SessionLog.shared.write("Riva translated=\(index + 1)/\(lines.count)")
+                }
             }
         }
         let directory = AppStoragePaths.output.appendingPathComponent(
@@ -112,9 +132,11 @@ enum StudioPipeline {
             isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var files = try writeTranscripts(lines, to: directory)
+        SessionLog.shared.write("Transcript exported files=\(files.count)")
         var warnings: [String] = []
         if subtitles {
             files += try writeSubtitles(lines, to: directory)
+            SessionLog.shared.write("Subtitles exported SRT/VTT/ASS")
         }
         if !translated.isEmpty {
             files += try writeTranscripts(translated, to: directory, suffix: "-tradotta")
@@ -128,6 +150,7 @@ enum StudioPipeline {
             let dubbedWAV = try await dub(voiceLines, language: voiceLanguage,
                                           to: directory, progress: progress)
             files.append(dubbedWAV)
+            SessionLog.shared.write("Dubbing WAV exported bytes=\((try? dubbedWAV.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)", always: true)
             if try await MediaComposer.hasVideo(source) {
                 try Task.checkCancellation()
                 progress("Creo MOV con audio originale + doppiaggio separato")
@@ -136,6 +159,7 @@ enum StudioPipeline {
                     try await MediaComposer.muxOriginalAndDubbing(
                         video: source, dubbing: dubbedWAV, output: video)
                     files.append(video)
+                    SessionLog.shared.write("MOV with separate original/dub audio exported", always: true)
                 } catch is CancellationError {
                     try? FileManager.default.removeItem(at: video)
                     throw CancellationError()
@@ -156,6 +180,7 @@ enum StudioPipeline {
                     video: source, lines: translated.isEmpty ? lines : translated,
                     output: video)
                 files.append(video)
+                SessionLog.shared.write("Burn-in MP4 exported", always: true)
             } catch is CancellationError {
                 try? FileManager.default.removeItem(at: video)
                 throw CancellationError()
@@ -167,12 +192,14 @@ enum StudioPipeline {
             }
         }
         progress("Pronto")
+        SessionLog.shared.write("Pipeline done lines=\(lines.count) files=\(files.count) warnings=\(warnings.count)", always: true)
         return StudioResult(lines: lines, translated: translated, files: files,
                             warnings: warnings)
     }
 
     static func synthesize(_ text: String, voice: String, language: String) async throws -> URL {
         let model = try await MagpieTTS.fromPretrained(variant: .int8)
+        SessionLog.shared.write("Magpie voice model loaded")
         try Task.checkCancellation()
         guard let selectedVoice = MagpieSpeaker(named: voice),
               let selectedLanguage = MagpieLanguage(code: language) else {
@@ -183,6 +210,7 @@ enum StudioPipeline {
             params: MagpieTTSParams(temperature: 0, topK: 1, maxSteps: 500))
         let url = AppStoragePaths.output.appendingPathComponent("magpie-\(UUID().uuidString.prefix(8)).wav")
         try writeWAV(samples, at: url, sampleRate: Double(MagpieTTS.sampleRate))
+        SessionLog.shared.write("Magpie synthesized samples=\(samples.count)")
         return url
     }
 
@@ -194,6 +222,7 @@ enum StudioPipeline {
             throw StudioPipelineError.unsupportedFormat
         }
         let model = try await MagpieTTS.fromPretrained(variant: .int8)
+        SessionLog.shared.write("Magpie dubbing model loaded lines=\(lines.count)")
         let sampleRate = MagpieTTS.sampleRate
         guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                          sampleRate: Double(sampleRate), channels: 1,
@@ -247,6 +276,9 @@ enum StudioPipeline {
             let samples = try model.synthesize(
                 text: line.text, speaker: voice, language: speechLanguage,
                 params: MagpieTTSParams(temperature: 0, topK: 1, maxSteps: 500))
+            if (index + 1) % 10 == 0 || index + 1 == lines.count {
+                SessionLog.shared.write("Magpie dubbed=\(index + 1)/\(lines.count) samples=\(samples.count)")
+            }
             let offset = max(0, start - cursor)
             if offset + samples.count > pending.count {
                 pending.append(contentsOf: repeatElement(Float(0), count: offset + samples.count - pending.count))

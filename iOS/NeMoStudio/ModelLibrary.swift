@@ -26,6 +26,7 @@ final class ModelLibrary: ObservableObject {
     @Published private(set) var status = "Modelli non ancora verificati"
     @Published private(set) var fraction = 0.0
     private var work: Task<Void, Never>?
+    private var lastProgressBucket = -1
 
     init() {
         Task {
@@ -38,6 +39,7 @@ final class ModelLibrary: ObservableObject {
                      magpie?.appendingPathComponent("nanocodec_decoder/model.safetensors"),
                      Self.rivaPath].allSatisfy { $0.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
             status = ready ? "Modelli in cache · verifica integrità al download" : "Scarica i modelli per iniziare"
+            SessionLog.shared.write("Cache check ready=\(ready) ASR=\(asr != nil) Sortformer=\(sort != nil) Magpie=\(magpie != nil) Riva=\(FileManager.default.fileExists(atPath: Self.rivaPath.path))", always: true)
         }
     }
 
@@ -59,10 +61,16 @@ final class ModelLibrary: ObservableObject {
         try HuggingFaceDownloader.getCacheDirectory(for: modelId)
     }
 
-    private func reportProgress(base: Double, weight: Double) -> @Sendable (Double) -> Void {
+    private func reportProgress(base: Double, weight: Double, model: String) -> @Sendable (Double) -> Void {
         { [weak self] value in
             Task { @MainActor [weak self] in
-                self?.fraction = base + weight * value
+                guard let self else { return }
+                self.fraction = base + weight * value
+                let bucket = Int(value * 20)
+                if bucket > self.lastProgressBucket {
+                    self.lastProgressBucket = bucket
+                    SessionLog.shared.write("Download \(model): \(Int(value * 100))% overall=\(Int(self.fraction * 100))%")
+                }
             }
         }
     }
@@ -71,33 +79,42 @@ final class ModelLibrary: ObservableObject {
         guard !downloading else { return }
         downloading = true
         ready = false
+        SessionLog.shared.write("Model download started; available space checked before each large transfer", always: true)
         work = Task {
             do {
                 try Self.ensureSpace(512 * 1024 * 1024)
                 let asrID = NemotronStreamingASRModel.defaultModelId
                 status = "Nemotron 3.5: download/resume + verifica SHA"
+                lastProgressBucket = -1
                 let asrPath = try Self.modelDirectory(asrID)
+                SessionLog.shared.write("ASR model id=\(asrID) cache=\(asrPath.lastPathComponent)")
                 try await HuggingFaceDownloader.downloadWeights(
                     modelId: asrID, to: asrPath,
                     additionalFiles: ["encoder.mlmodelc/**", "decoder.mlmodelc/**", "joint.mlmodelc/**",
                                       "vocab.json", "tokenizer.model", "*_tokenizer.model",
                                       "vocab.txt", "languages.json", "config.json"],
-                    progressHandler: reportProgress(base: 0, weight: 0.25))
+                    progressHandler: reportProgress(base: 0, weight: 0.25, model: "Nemotron"))
+                SessionLog.shared.write("ASR download verified")
                 try Task.checkCancellation()
                 status = "Sortformer: download/resume + verifica SHA"
+                lastProgressBucket = -1
                 let sortID = SortformerDiarizer.defaultModelId
                 let sortPath = try Self.modelDirectory(sortID)
                 try await HuggingFaceDownloader.downloadWeights(
                     modelId: sortID, to: sortPath,
                     additionalFiles: ["Sortformer.mlmodelc/**", "config.json"],
-                    progressHandler: reportProgress(base: 0.25, weight: 0.25))
+                    progressHandler: reportProgress(base: 0.25, weight: 0.25, model: "Sortformer"))
+                SessionLog.shared.write("Sortformer download verified")
                 try Task.checkCancellation()
                 status = "Magpie + NanoCodec: download/resume + verifica SHA"
+                lastProgressBucket = -1
                 _ = try await MagpieTTSDownloader.ensureDownloaded(
-                    variant: .int8, progressHandler: reportProgress(base: 0.50, weight: 0.25))
+                    variant: .int8, progressHandler: reportProgress(base: 0.50, weight: 0.25, model: "Magpie"))
+                SessionLog.shared.write("Magpie/NanoCodec download verified")
                 try Task.checkCancellation()
                 status = "Riva Translate Q4_K_M: download/resume + SHA-256"
-                try await Self.downloadRiva(progress: reportProgress(base: 0.75, weight: 0.25))
+                lastProgressBucket = -1
+                try await Self.downloadRiva(progress: reportProgress(base: 0.75, weight: 0.25, model: "Riva"))
                 try ("Riva SHA-256: " + Self.rivaHash).write(
                     to: Self.verifiedMarker, atomically: true, encoding: .utf8)
                 fraction = 1
@@ -106,24 +123,31 @@ final class ModelLibrary: ObservableObject {
                 SessionLog.shared.write("Download modelli completato", always: true)
             } catch is CancellationError {
                 status = "Download sospeso: riprende dal pulsante"
-                SessionLog.shared.write("Download sospeso", always: true)
+                SessionLog.shared.write("Model download cancelled at \(Int(fraction * 100))%", always: true)
             } catch {
                 status = "Modelli incompleti: \(error.localizedDescription)"
-                SessionLog.shared.write("Download modello fallito: \(error.localizedDescription)", always: true)
+                SessionLog.shared.write("Model download failed at \(Int(fraction * 100))%: \(String(reflecting: error))", always: true)
             }
             downloading = false
             work = nil
         }
     }
 
-    func stop() { work?.cancel() }
+    func stop() {
+        SessionLog.shared.write("Model download stop requested")
+        work?.cancel()
+    }
 
     private static func downloadRiva(progress: @escaping @Sendable (Double) -> Void) async throws {
         let final = rivaPath
         if FileManager.default.fileExists(atPath: final.path),
-           try sha256(final) == rivaHash { return }
+           try sha256(final) == rivaHash {
+            SessionLog.shared.write("Riva cache SHA-256 verified; skipping download")
+            return
+        }
         let part = final.appendingPathExtension("part")
         var offset = (try? part.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+        SessionLog.shared.write("Riva resume offset=\(offset) bytes")
         var total: Int64?
         repeat {
             try Task.checkCancellation()
@@ -133,6 +157,7 @@ final class ModelLibrary: ObservableObject {
             request.setValue("bytes=\(offset)-\(end)", forHTTPHeaderField: "Range")
             let (tempURL, response) = try await URLSession.shared.download(for: request)
             guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+            SessionLog.shared.write("Riva HTTP \(http.statusCode) requested=\(offset)-\(end) received=\(response.expectedContentLength)")
             if http.statusCode == 416,
                let range = http.value(forHTTPHeaderField: "Content-Range"),
                range.hasPrefix("bytes */"),
@@ -186,6 +211,7 @@ final class ModelLibrary: ObservableObject {
             }
         } while total.map { offset < $0 } ?? true
         let actual = try sha256(part)
+        SessionLog.shared.write("Riva SHA-256 expected=\(rivaHash) actual=\(actual)")
         guard actual == rivaHash else {
             try FileManager.default.removeItem(at: part)
             throw DownloadError.checksumMismatch(file: rivaFile, expected: rivaHash, actual: actual)

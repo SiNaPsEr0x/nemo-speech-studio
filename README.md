@@ -21,7 +21,7 @@ L'[app iOS](iOS/README.md) offre un'interfaccia nativa per importare audio e vid
 
 **[Scarica l'IPA unsigned dalla Release iOS](https://github.com/SiNaPsEr0x/nemo-speech-studio/releases/tag/ios-current)** e firmala con un certificato valido prima di installarla, ad esempio usando ESign. Al primo avvio premi **«Scarica / riprendi modelli»**: i pesi non sono inclusi nell'IPA, servono connessione Internet e diversi GB liberi. I download si possono interrompere e riprendere; i modelli restano nella cache privata dell'app.
 
-Per diagnosticare un errore, abilita **Debug** in Impostazioni iOS → NeMo Studio e condividi `session.log` dall'app. Il file viene sovrascritto a ogni nuovo avvio. I preset **«Video + traccia» (MKV con sottotitoli soft)** e **«Tutto»** sono ancora disabilitati; iOS deve poter decodificare il video scelto. La compilazione e l'IPA sono state verificate in CI, mentre l'inferenza sui modelli reali richiede ancora una prova su iPhone.
+L'interfaccia usa quattro tab native: **Inizio**, **Studio**, **Risultati** e **Voce**. Per diagnosticare un errore, abilita **Debug** in Impostazioni iOS → NeMo Studio; trovi `session.log` in **File → Sul mio iPhone → NeMo Studio** e puoi esportarlo da lì. Con Debug attivo il file viene sovrascritto al nuovo avvio. I preset **«Video + traccia» (MKV con sottotitoli soft)** e **«Tutto»** sono ancora disabilitati; iOS deve poter decodificare il video scelto. La compilazione e l'IPA sono state verificate in CI, mentre l'inferenza sui modelli reali richiede ancora una prova su iPhone.
 
 ## Requisiti Windows
 

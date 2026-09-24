@@ -53,6 +53,7 @@ final class RivaTranslator {
         self.context = context
         self.vocab = llama_model_get_vocab(model)
         self.sampler = llama_sampler_init_greedy()
+        SessionLog.shared.write("Riva model ready context=1024 batch=512 gpuLayers=\(modelParams.n_gpu_layers)")
     }
 
     deinit {
@@ -83,6 +84,7 @@ final class RivaTranslator {
             }
         }
         guard count > 0, Int(count) < Int(llama_n_ctx(context)) else { throw RivaError.promptTooLong }
+        SessionLog.shared.write("Riva inference pair=\(a)->\(b) inputCharacters=\(text.count) promptTokens=\(count)")
         llama_memory_clear(llama_get_memory(context), true)
         var offset = 0
         let batchSize = Int(llama_n_batch(context))
@@ -114,6 +116,7 @@ final class RivaTranslator {
             guard llama_decode(context, llama_batch_get_one(&next, 1)) == 0 else { throw RivaError.decode }
         }
         guard let result = String(data: bytes, encoding: .utf8) else { throw RivaError.invalidOutput }
+        SessionLog.shared.write("Riva inference outputBytes=\(bytes.count)")
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

@@ -13,41 +13,67 @@ final class StudioAppDelegate: NSObject, UIApplicationDelegate {
     }
 }
 
-// A single, per-process session log: truncate before anything else writes to it.
+// Files → On My iPhone → NeMo Studio → session.log. A new debug session
+// replaces the previous one; no diagnostics are written with Debug disabled.
 final class SessionLog: @unchecked Sendable {
     static let shared = SessionLog()
     let url: URL
     private let queue = DispatchQueue(label: "NeMoStudio.sessionLog")
     private let formatter = ISO8601DateFormatter()
+    private var enabled = false
+    private let sessionID = UUID().uuidString.prefix(8)
 
     private init() {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        url = support.appendingPathComponent("session.log")
-        FileManager.default.createFile(atPath: url.path, contents: Data())
-        write("Avvio applicazione", always: true)
-        if UserDefaults.standard.bool(forKey: "lastSessionUnfinished") {
-            write("Sessione precedente interrotta senza chiusura regolare (possibile arresto improvviso).", always: true)
-        }
+        url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("session.log")
+        refresh()
         UserDefaults.standard.set(true, forKey: "lastSessionUnfinished")
     }
 
-    func write(_ message: String, always: Bool = false) {
-        guard always || UserDefaults.standard.bool(forKey: "debugEnabled") else { return }
-        queue.async { [self] in
-            let safe = message.replacingOccurrences(of: "\n", with: " ")
-            let line = "\(formatter.string(from: Date())) \(safe)\n"
-            guard let data = line.data(using: .utf8), let handle = try? FileHandle(forWritingTo: url) else { return }
-            defer { try? handle.close() }
-            do {
-                try handle.seekToEnd()
-                try handle.write(contentsOf: data)
-            } catch { /* Logging cannot crash the app. */ }
+    func refresh() {
+        let shouldEnable = UserDefaults.standard.bool(forKey: "debugEnabled")
+        queue.sync {
+            guard shouldEnable != enabled else { return }
+            if shouldEnable {
+                let legacy = AppStoragePaths.base.appendingPathComponent("session.log")
+                try? FileManager.default.removeItem(at: legacy)
+                do {
+                    try Data().write(to: url, options: .atomic)
+                    enabled = true
+                    let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+                    let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+                    append("SESSION \(sessionID) | NeMo Studio \(version) (\(build)) | \(ProcessInfo.processInfo.operatingSystemVersionString) | RAM \(ProcessInfo.processInfo.physicalMemory / 1_048_576) MiB")
+                    if UserDefaults.standard.bool(forKey: "lastSessionUnfinished") {
+                        append("PREVIOUS SESSION ended unexpectedly while active (possible crash or system termination)")
+                    }
+                    append("DEBUG enabled; models kept in Application Support, log exported in Documents")
+                } catch { enabled = false }
+            } else {
+                append("DEBUG disabled")
+                enabled = false
+            }
         }
     }
 
+    func write(_ message: String, always: Bool = false) {
+        let event = "\(always ? "EVENT" : "DEBUG") \(message)"
+        queue.async { [self] in if enabled { append(event) } }
+    }
+
+    private func append(_ message: String) {
+        let safe = message.replacingOccurrences(of: "\n", with: " ")
+        let line = "\(formatter.string(from: Date())) \(safe)\n"
+        guard let data = line.data(using: .utf8),
+              let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        do {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } catch { /* Diagnostics must never interrupt inference. */ }
+    }
+
     func finish() {
-        write("Sessione in pausa / background", always: true)
+        write("App in background", always: true)
         UserDefaults.standard.set(false, forKey: "lastSessionUnfinished")
     }
 }
@@ -93,8 +119,9 @@ struct NeMoStudioApp: App {
                 .preferredColorScheme(.dark)
                 .onChange(of: scenePhase) { phase in
                     if phase == .active {
+                        SessionLog.shared.refresh()
                         UserDefaults.standard.set(true, forKey: "lastSessionUnfinished")
-                        SessionLog.shared.write("App attiva")
+                        SessionLog.shared.write("App active", always: true)
                     } else if phase == .background {
                         SessionLog.shared.finish()
                     }
@@ -104,11 +131,13 @@ struct NeMoStudioApp: App {
 }
 
 private enum StudioStyle {
-    static let background = Color(red: 0.035, green: 0.075, blue: 0.10)
-    static let surface = Color(red: 0.075, green: 0.14, blue: 0.17)
-    static let accent = Color(red: 0.54, green: 0.96, blue: 0.61)
-    static let muted = Color(red: 0.62, green: 0.72, blue: 0.72)
+    static let background = Color(red: 0.035, green: 0.072, blue: 0.10)
+    static let surface = Color(red: 0.085, green: 0.145, blue: 0.175)
+    static let accent = Color(red: 0.50, green: 0.96, blue: 0.73)
+    static let muted = Color(red: 0.68, green: 0.77, blue: 0.79)
 }
+
+private enum StudioTab: Hashable { case home, studio, results, voice }
 
 private enum StudioMode: String, CaseIterable, Identifiable {
     case transcription = "Trascrizione"
@@ -125,12 +154,12 @@ private enum StudioMode: String, CaseIterable, Identifiable {
 
 struct StudioView: View {
     @StateObject private var library = ModelLibrary()
+    @State private var selectedTab: StudioTab = .home
     @State private var importerOpen = false
     @State private var selectedFile: URL?
     @State private var importing = false
     @State private var mode: StudioMode = .transcription
     @State private var info: String?
-    @State private var debugEnabled = UserDefaults.standard.bool(forKey: "debugEnabled")
     @State private var language = "it-IT"
     @State private var translate = false
     @State private var targetLanguage = "en"
@@ -146,27 +175,13 @@ struct StudioView: View {
     @State private var voiceFile: URL?
 
     var body: some View {
-        ZStack {
-            StudioStyle.background.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    header
-                    hero
-                    modelCard
-                    importCard
-                    workflowCard
-                    engineCard
-                    voiceCard
-                    diagnostics
-                    Text("NeMo Studio · progetto indipendente · SiNaPsEr0x")
-                        .font(.caption2).foregroundStyle(StudioStyle.muted)
-                        .frame(maxWidth: .infinity)
-                }
-                .padding(20)
-                .frame(maxWidth: 680)
-                .frame(maxWidth: .infinity)
-            }
+        TabView(selection: $selectedTab) {
+            Tab("Inizio", systemImage: "house.fill", value: .home) { homeScreen }
+            Tab("Studio", systemImage: "waveform", value: .studio) { studioScreen }
+            Tab("Risultati", systemImage: "square.stack.fill", value: .results) { resultsScreen }
+            Tab("Voce", systemImage: "mic.fill", value: .voice) { voiceScreen }
         }
+        .tint(StudioStyle.accent)
         .fileImporter(isPresented: $importerOpen, allowedContentTypes: [.audio, .movie, .video, .mpeg4Movie, .data]) { result in
             switch result {
             case .success(let url): importMedia(url)
@@ -179,57 +194,114 @@ struct StudioView: View {
             Button("OK", role: .cancel) { info = nil }
         } message: { Text(info ?? "") }
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
-            debugEnabled = UserDefaults.standard.bool(forKey: "debugEnabled")
+            SessionLog.shared.refresh()
+        }
+        .onChange(of: selectedTab) { _, tab in
+            SessionLog.shared.write("Tab \(String(describing: tab))")
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "waveform.path")
-                .font(.title2.weight(.bold)).foregroundStyle(StudioStyle.accent)
-                .frame(width: 48, height: 48).background(StudioStyle.surface, in: RoundedRectangle(cornerRadius: 15))
-            VStack(alignment: .leading, spacing: 2) {
-                Text("NeMo Studio").font(.title2.bold())
-                Text("Il tuo studio audio, sul dispositivo").font(.caption).foregroundStyle(StudioStyle.muted)
+    private func screen<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        NavigationStack {
+            ScrollView {
+                content()
+                    .frame(maxWidth: 680)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 12)
+                    .padding(.bottom, 32)
             }
-            Spacer()
-            Circle().fill(.orange).frame(width: 9, height: 9)
+            .background(StudioStyle.background.ignoresSafeArea())
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.large)
         }
-        .accessibilityElement(children: .combine)
+    }
+
+    private var homeScreen: some View {
+        screen(title: "NeMo Studio") {
+            VStack(alignment: .leading, spacing: 18) {
+                hero
+                modelCard
+                Button {
+                    selectedTab = .studio
+                } label: {
+                    Label("Nuova elaborazione", systemImage: "arrow.right.circle.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+                .controlSize(.large)
+                HStack(spacing: 12) {
+                    Image(systemName: "iphone.gen3")
+                        .font(.title2).foregroundStyle(StudioStyle.accent)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Elabora sul tuo iPhone").font(.subheadline.bold())
+                        Text("I file importati restano sul dispositivo.")
+                            .font(.caption).foregroundStyle(StudioStyle.muted)
+                    }
+                }.card()
+                Text("NeMo Studio · progetto indipendente · SiNaPsEr0x")
+                    .font(.caption2).foregroundStyle(StudioStyle.muted)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+    }
+
+    private var studioScreen: some View {
+        screen(title: "Studio") {
+            VStack(alignment: .leading, spacing: 18) {
+                importCard
+                workflowCard
+            }
+        }
+    }
+
+    private var resultsScreen: some View {
+        screen(title: "Risultati") {
+            VStack(alignment: .leading, spacing: 18) { resultsCard }
+        }
+    }
+
+    private var voiceScreen: some View {
+        screen(title: "Voce") {
+            VStack(alignment: .leading, spacing: 18) { voiceCard }
+        }
     }
 
     private var hero: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            Text("AUDIO · VOCI · VIDEO").font(.caption.bold()).tracking(2).foregroundStyle(StudioStyle.accent)
-            Text("Ogni voce ha\nuna storia.")
-                .font(.system(size: 40, weight: .heavy, design: .rounded)).tracking(-1.6)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("AUDIO · VOCI · VIDEO")
+                .font(.caption.bold()).tracking(1.8).foregroundStyle(StudioStyle.accent)
+            Text("Ogni voce ha una storia.")
+                .font(.system(size: 31, weight: .bold, design: .rounded))
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Importa una registrazione e prepara il tuo flusso di lavoro, senza caricare file su un server.")
-                .foregroundStyle(.white.opacity(0.78))
-            Waveform().frame(height: 65).padding(.top, 10)
+            Text("Trascrivi, traduci e dai voce ai tuoi file.")
+                .font(.subheadline).foregroundStyle(.white.opacity(0.8))
+            Waveform().frame(height: 40).padding(.top, 3)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(24)
+        .padding(22)
         .background(
             LinearGradient(colors: [Color(red: 0.11, green: 0.31, blue: 0.24), StudioStyle.surface], startPoint: .topLeading, endPoint: .bottomTrailing),
-            in: RoundedRectangle(cornerRadius: 25)
+            in: RoundedRectangle(cornerRadius: 22)
         )
-        .overlay(RoundedRectangle(cornerRadius: 25).strokeBorder(StudioStyle.accent.opacity(0.25)))
+        .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(StudioStyle.accent.opacity(0.25)))
     }
 
     private var importCard: some View {
         VStack(alignment: .leading, spacing: 15) {
-            Label("Il tuo file", systemImage: "square.and.arrow.down.fill").font(.headline)
+            Label("File da elaborare", systemImage: "square.and.arrow.down.fill")
+                .font(.headline).foregroundStyle(.white)
             Button { importerOpen = true } label: {
-                VStack(spacing: 8) {
+                VStack(spacing: 10) {
                     Image(systemName: selectedFile == nil ? "plus.circle.fill" : "waveform")
-                        .font(.system(size: 33)).foregroundStyle(StudioStyle.accent)
-                    Text(importing ? "Copio il file in locale…" : (selectedFile?.lastPathComponent ?? "Scegli audio o video"))
-                        .font(.subheadline.weight(.semibold)).lineLimit(2)
-                    Text("Il file viene copiato nello spazio privato dell’app")
+                        .font(.system(size: 30)).foregroundStyle(StudioStyle.accent)
+                    Text(importing ? "Importazione…" : (selectedFile?.lastPathComponent ?? "Scegli audio o video"))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white).lineLimit(2)
+                    Text("Apri un file da File o da un'altra app")
                         .font(.caption).foregroundStyle(StudioStyle.muted)
                 }
-                .frame(maxWidth: .infinity).padding(.vertical, 25)
+                .frame(maxWidth: .infinity).padding(.vertical, 22)
                 .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 17))
             }
             .buttonStyle(.plain)
@@ -238,28 +310,40 @@ struct StudioView: View {
     }
 
     private var modelCard: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            Label("Modelli sul telefono", systemImage: "arrow.down.circle.fill").font(.headline)
-            Text(library.status).font(.caption).foregroundStyle(StudioStyle.muted)
-            if library.downloading { ProgressView(value: library.fraction).tint(StudioStyle.accent) }
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Button(library.downloading ? "Download in corso" : "Scarica / riprendi modelli") {
+                Label("Modelli", systemImage: "square.stack.3d.up.fill").font(.headline)
+                Spacer()
+                Text(library.ready ? "PRONTI" : library.downloading ? "DOWNLOAD" : "DA SCARICARE")
+                    .font(.caption2.bold()).foregroundStyle(library.ready ? StudioStyle.accent : StudioStyle.muted)
+            }
+            Text(library.status).font(.subheadline).foregroundStyle(StudioStyle.muted)
+            if library.downloading {
+                ProgressView(value: library.fraction).tint(StudioStyle.accent)
+                Text("\(Int(library.fraction * 100))% · puoi fermarti e riprendere")
+                    .font(.caption).foregroundStyle(StudioStyle.muted)
+            }
+            HStack(spacing: 10) {
+                Button(library.ready ? "Verifica / aggiorna" : "Scarica / riprendi") {
                     library.downloadAll()
                 }
+                .frame(maxWidth: .infinity)
                 .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
                 .disabled(library.downloading)
                 if library.downloading {
-                    Button("Stop") { library.stop() }.buttonStyle(.bordered)
+                    Button("Ferma") { library.stop() }
+                        .buttonStyle(.bordered).tint(StudioStyle.accent)
                 }
             }
-            Text("Nemotron 3.5 · Sortformer · Magpie/NanoCodec · Riva 4B. I file restano nella cartella privata Models; un download interrotto riparte da quelli già verificati.")
-                .font(.caption2).foregroundStyle(StudioStyle.muted)
+            .controlSize(.large)
+            Text("Nemotron 3.5 · Sortformer · Magpie · Riva 4B")
+                .font(.caption).foregroundStyle(StudioStyle.muted)
         }.card()
     }
 
     private var workflowCard: some View {
         VStack(alignment: .leading, spacing: 17) {
-            Label("Flusso di lavoro", systemImage: "slider.horizontal.3").font(.headline)
+            Label("Elaborazione", systemImage: "slider.horizontal.3").font(.headline)
             Picker("Preset", selection: $mode) {
                 ForEach(StudioMode.allCases) { option in Text(option.rawValue).tag(option) }
             }
@@ -289,11 +373,6 @@ struct StudioView: View {
                 Text("Riva supporta queste lingue tramite l’inglese; scegli una lingua originale esplicita per la traduzione.")
                     .font(.caption2).foregroundStyle(StudioStyle.muted)
             }
-            HStack(spacing: 9) {
-                feature("Trascrivi", "text.quote")
-                feature("Parlanti", "person.2.wave.2")
-                feature("Traduci", "character.book.closed")
-            }
             Text(mode == .dubbing
                  ? "WAV dei parlanti; per MP4/MOV compatibili creo anche un MOV con audio originale e doppiaggio selezionabili."
                  : mode == .burnIn
@@ -302,22 +381,38 @@ struct StudioView: View {
                     ? "Nemotron 3.5, Sortformer e Riva elaborano sul dispositivo. I modelli vanno scaricati una sola volta."
                     : "Questo preset richiede ancora produzione video iOS: non produce risultati simulati."))
                 .font(.caption).foregroundStyle(StudioStyle.muted)
-            Button(working ? "Elaborazione in corso" : "Avvia elaborazione") { start() }
-                .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+            Button { start() } label: {
+                Label(working ? "Elaborazione in corso" : "Avvia elaborazione", systemImage: "play.fill")
+                    .frame(maxWidth: .infinity)
+            }
+                .buttonStyle(.borderedProminent).tint(StudioStyle.accent).controlSize(.large)
                 .disabled(working || importing || !library.ready || selectedFile == nil || !mode.available || ((translate || mode == .dubbing) && language == "auto"))
-                .frame(maxWidth: .infinity)
-            if working { Button("Stop elaborazione") { job?.cancel() }.foregroundStyle(.orange) }
+            if working {
+                Button("Ferma elaborazione", role: .cancel) { job?.cancel() }
+                    .frame(maxWidth: .infinity).buttonStyle(.bordered).tint(.orange)
+            }
             if !status.isEmpty { Text(status).font(.caption).foregroundStyle(StudioStyle.accent) }
+            if !library.ready {
+                Text("Prima scarica i modelli nella tab Inizio.")
+                    .font(.caption).foregroundStyle(StudioStyle.muted)
+            }
         }.card()
     }
 
-    private var engineCard: some View {
-        HStack(alignment: .top, spacing: 13) {
-            Image(systemName: "cpu").foregroundStyle(StudioStyle.accent)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Nemotron 3.5 + Sortformer + Riva + Magpie").font(.subheadline.bold())
-                Text("Modelli NVIDIA sul dispositivo: ASR Core ML, Riva GGUF/Metal e TTS MLX. Video MOV/MP4 compatibili; MKV ancora da integrare.")
-                    .font(.caption).foregroundStyle(StudioStyle.muted)
+    private var resultsCard: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if lines.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "waveform.badge.magnifyingglass")
+                        .font(.system(size: 38)).foregroundStyle(StudioStyle.accent)
+                    Text("I risultati appariranno qui").font(.headline)
+                    Text("Importa un file e avvia un'elaborazione nella tab Studio.")
+                        .font(.subheadline).multilineTextAlignment(.center)
+                        .foregroundStyle(StudioStyle.muted)
+                    Button("Apri Studio") { selectedTab = .studio }
+                        .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+                }
+                .frame(maxWidth: .infinity).padding(.vertical, 30)
             }
             if !lines.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -325,10 +420,6 @@ struct StudioView: View {
                     ForEach(lines) { line in
                         Text("\(line.speaker > 0 ? "Speaker \(line.speaker) · " : "")\(line.text)")
                             .font(.caption).foregroundStyle(.white.opacity(0.9))
-                    }
-                    ForEach(files, id: \.self) { file in
-                        ShareLink(item: file) { Label(file.lastPathComponent, systemImage: "square.and.arrow.up") }
-                            .font(.caption).foregroundStyle(StudioStyle.accent)
                     }
                 }
             }
@@ -338,6 +429,24 @@ struct StudioView: View {
                     ForEach(translated) { line in
                         Text("\(line.speaker > 0 ? "Speaker \(line.speaker) · " : "")\(line.text)")
                             .font(.caption).foregroundStyle(.white.opacity(0.9))
+                    }
+                }
+            }
+            if !files.isEmpty {
+                Divider().overlay(StudioStyle.muted.opacity(0.4))
+                Text("File pronti").font(.headline)
+                ForEach(files, id: \.self) { file in
+                    ShareLink(item: file) {
+                        HStack {
+                            Image(systemName: "doc.fill")
+                            Text(file.lastPathComponent).lineLimit(2)
+                            Spacer()
+                            Image(systemName: "square.and.arrow.up")
+                        }
+                        .font(.subheadline)
+                        .foregroundStyle(StudioStyle.accent)
+                        .padding(12)
+                        .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 12))
                     }
                 }
             }
@@ -352,12 +461,19 @@ struct StudioView: View {
             Picker("Voce", selection: $voice) {
                 ForEach(["John", "Sofia", "Jason", "Aria", "Leo"], id: \.self) { Text($0).tag($0) }
             }
-            Button("Genera WAV in italiano") { synthesize() }
+            Button { synthesize() } label: {
+                Label("Genera WAV in italiano", systemImage: "waveform")
+                    .frame(maxWidth: .infinity)
+            }
                 .disabled(!library.ready || voiceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || working)
-                .buttonStyle(.borderedProminent).tint(StudioStyle.accent)
+                .buttonStyle(.borderedProminent).tint(StudioStyle.accent).controlSize(.large)
             if let voiceFile {
                 ShareLink(item: voiceFile) { Label("Condividi WAV", systemImage: "square.and.arrow.up") }
                     .foregroundStyle(StudioStyle.accent)
+            }
+            if !library.ready {
+                Text("I modelli Magpie si scaricano dalla tab Inizio.")
+                    .font(.caption).foregroundStyle(StudioStyle.muted)
             }
         }.card()
     }
@@ -375,6 +491,8 @@ struct StudioView: View {
         let makeSubtitles = mode == .subtitles || mode == .burnIn
         let makeDubbing = mode == .dubbing
         let makeBurnIn = mode == .burnIn
+        let startedAt = Date()
+        SessionLog.shared.write("Job start mode=\(mode.rawValue) language=\(selectedLanguage) target=\(selectedTarget ?? "none") diarization=\(useDiarization) subtitles=\(makeSubtitles) dubbing=\(makeDubbing) burnIn=\(makeBurnIn) media=\(selectedFile.lastPathComponent)", always: true)
         job = Task {
             do {
                 let worker = Task.detached(priority: .userInitiated) {
@@ -382,6 +500,7 @@ struct StudioView: View {
                                                      targetLanguage: selectedTarget,
                                                      diarization: useDiarization, subtitles: makeSubtitles,
                                                      dubbing: makeDubbing, burnIn: makeBurnIn) { phase in
+                        SessionLog.shared.write("Pipeline phase: \(phase)")
                         Task { @MainActor in self.status = phase }
                     }
                 }
@@ -394,11 +513,14 @@ struct StudioView: View {
                 status = result.warnings.isEmpty
                     ? "Completato: \(result.files.count) file pronti"
                     : "Completato con avviso: \(result.warnings.joined(separator: " "))"
+                selectedTab = .results
+                SessionLog.shared.write("Job complete in \(Int(Date().timeIntervalSince(startedAt)))s: \(result.lines.count) lines, \(result.translated.count) translated, \(result.files.count) files, \(result.warnings.count) warnings", always: true)
             } catch is CancellationError {
                 status = "Interrotto"
+                SessionLog.shared.write("Job cancelled after \(Int(Date().timeIntervalSince(startedAt)))s", always: true)
             } catch {
                 status = "Errore: \(error.localizedDescription)"
-                SessionLog.shared.write("Elaborazione fallita: \(error.localizedDescription)", always: true)
+                SessionLog.shared.write("Job failed after \(Int(Date().timeIntervalSince(startedAt)))s: \(String(reflecting: error))", always: true)
             }
             working = false
             job = nil
@@ -410,6 +532,7 @@ struct StudioView: View {
         status = "MagpieTTS genera la voce..."
         let text = voiceText
         let selectedVoice = voice
+        SessionLog.shared.write("Magpie start speaker=\(selectedVoice) characters=\(text.count)", always: true)
         job = Task {
             do {
                 let worker = Task.detached(priority: .userInitiated) {
@@ -419,38 +542,19 @@ struct StudioView: View {
                     try await worker.value
                 }, onCancel: { worker.cancel() })
                 status = "WAV pronto"
+                SessionLog.shared.write("Magpie WAV ready: \(voiceFile?.lastPathComponent ?? "unknown")", always: true)
             } catch {
                 status = "Errore voce: \(error.localizedDescription)"
-                SessionLog.shared.write("Magpie fallito: \(error.localizedDescription)", always: true)
+                SessionLog.shared.write("Magpie failed: \(String(reflecting: error))", always: true)
             }
             working = false
             job = nil
         }
     }
 
-    private var diagnostics: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("Diagnostica", systemImage: "stethoscope").font(.headline)
-            Text("Debug \(debugEnabled ? "attivo" : "spento") · Impostazioni iOS → NeMo Studio → Debug")
-                .font(.caption).foregroundStyle(StudioStyle.muted)
-            ShareLink(item: SessionLog.shared.url) {
-                Label("Condividi il log di questa sessione", systemImage: "square.and.arrow.up")
-            }
-            .font(.subheadline.weight(.semibold)).foregroundStyle(StudioStyle.accent)
-        }.card()
-    }
-
-    private func feature(_ title: String, _ icon: String) -> some View {
-        VStack(spacing: 7) {
-            Image(systemName: icon).foregroundStyle(StudioStyle.accent)
-            Text(title).font(.caption2).lineLimit(1)
-        }
-        .frame(maxWidth: .infinity).padding(.vertical, 13)
-        .background(StudioStyle.background, in: RoundedRectangle(cornerRadius: 13))
-    }
-
     private func importMedia(_ url: URL) {
         importing = true
+        SessionLog.shared.write("Import start file=\(url.lastPathComponent)")
         Task {
             do {
                 let destination = try await Task.detached(priority: .utility) {
@@ -463,10 +567,11 @@ struct StudioView: View {
                 }.value
                 if let previous = selectedFile { try? FileManager.default.removeItem(at: previous) }
                 selectedFile = destination
-                SessionLog.shared.write("Media importato: \(destination.lastPathComponent)")
+                let bytes = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                SessionLog.shared.write("Import complete file=\(destination.lastPathComponent) bytes=\(bytes)", always: true)
             } catch {
                 info = "Copia non riuscita: \(error.localizedDescription)"
-                SessionLog.shared.write("Copia media fallita: \(error.localizedDescription)", always: true)
+                SessionLog.shared.write("Import failed: \(String(reflecting: error))", always: true)
             }
             importing = false
         }
