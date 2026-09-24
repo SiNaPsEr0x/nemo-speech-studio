@@ -1,4 +1,4 @@
-name: iOS port check
+name: Build and publish NeMo Studio iOS
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ios-port-${{ github.ref }}
@@ -30,7 +30,7 @@ jobs:
       - name: Generate Xcode project
         working-directory: iOS
         run: xcodegen generate
-      - name: Compile for iPhone (unsigned, no release)
+      - name: Compile for iPhone (unsigned)
         working-directory: iOS
         run: |
           version="$(date -u +%G.%V.%u)"
@@ -40,16 +40,48 @@ jobs:
             -skipPackagePluginValidation -skipMacroValidation \
             MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGNING_ALLOWED=NO build
-      - name: Package unsigned IPA for testing
+      - name: Package and verify unsigned IPA
         run: |
           mkdir -p "$RUNNER_TEMP/nemo-ipa/Payload"
           ditto "$RUNNER_TEMP/nemo-derived/Build/Products/Release-iphoneos/NeMoStudio.app" \
             "$RUNNER_TEMP/nemo-ipa/Payload/NeMoStudio.app"
           cd "$RUNNER_TEMP/nemo-ipa"
           ditto -c -k --keepParent Payload "$RUNNER_TEMP/NeMoStudio-unsigned.ipa"
-      - name: Upload test IPA (not a GitHub Release)
-        uses: actions/upload-artifact@v4
-        with:
-          name: NeMoStudio-unsigned-${{ github.run_number }}
-          path: ${{ runner.temp }}/NeMoStudio-unsigned.ipa
-          retention-days: 14
+          test -s "$RUNNER_TEMP/NeMoStudio-unsigned.ipa"
+          unzip -tq "$RUNNER_TEMP/NeMoStudio-unsigned.ipa"
+          test -f "$RUNNER_TEMP/nemo-ipa/Payload/NeMoStudio.app/Info.plist"
+      - name: Publish single iOS Release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="ios-current"
+          version="$(date -u +%G.%V.%u)"
+          asset="$RUNNER_TEMP/NeMoStudio-iOS-${version}-build${{ github.run_number }}-unsigned.ipa"
+          cp "$RUNNER_TEMP/NeMoStudio-unsigned.ipa" "$asset"
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          NeMo Studio per iOS: trascrizione locale Nemotron 3.5, identificazione parlanti Sortformer, traduzione Riva, sintesi Magpie, sottotitoli e video MP4/MOV compatibili.
+
+          L'IPA è senza firma: firmala con il tuo certificato prima di installarla su iPhone. Al primo avvio premi «Scarica / riprendi modelli»; i pesi non sono inclusi nell'IPA.
+
+          Limitazioni note: i preset «Video + traccia» (MKV soft subtitle) e «Tutto» sono disabilitati. Non sono ancora disponibili risultati di inferenza verificati su iPhone; i file/video incompatibili con AVFoundation non vengono elaborati. Per diagnosi attiva Debug nelle Impostazioni iOS e condividi session.log dall'app.
+          NOTES
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release view "$tag" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/old-assets.txt"
+            gh release upload "$tag" "$asset" --clobber
+            gh release edit "$tag" --title "NeMo Studio iOS $version · build ${{ github.run_number }}" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" --latest --target "$GITHUB_SHA"
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" \
+              -f sha="$GITHUB_SHA" -F force=true > /dev/null
+            while IFS= read -r old_asset; do
+              if [ -n "$old_asset" ] && [ "$old_asset" != "$(basename "$asset")" ]; then
+                gh release delete-asset "$tag" "$old_asset" --yes
+              fi
+            done < "$RUNNER_TEMP/old-assets.txt"
+          else
+            gh release create "$tag" "$asset" --target "$GITHUB_SHA" \
+              --title "NeMo Studio iOS $version · build ${{ github.run_number }}" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" --latest
+          fi
+          gh release view "$tag" --json url,assets --jq '{url: .url, files: [.assets[].name]}'
