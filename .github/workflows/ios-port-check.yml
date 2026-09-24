@@ -24,34 +24,6 @@ jobs:
       - name: Generate Xcode project
         working-directory: iOS
         run: xcodegen generate
-      - name: Resolve Swift packages and fix upstream Metal source
-        working-directory: iOS
-        run: |
-          set -o pipefail
-          xcodebuild -resolvePackageDependencies -project NeMoStudio.xcodeproj -scheme NeMoStudio \
-            -derivedDataPath "$RUNNER_TEMP/nemo-derived" \
-            2>&1 | tee "$RUNNER_TEMP/nemo-resolve.log"
-          python3 Scripts/patch_mlx_steel.py "$RUNNER_TEMP/nemo-derived"
-          if grep -nE 'warning:' "$RUNNER_TEMP/nemo-resolve.log"; then
-            echo '::error::La risoluzione dei pacchetti ha prodotto warning.'
-            exit 1
-          fi
-      - name: Compile for iPhone (unsigned)
-        working-directory: iOS
-        run: |
-          set -o pipefail
-          version="$(date -u +%G.%V.%u)"
-          xcodebuild -project NeMoStudio.xcodeproj -scheme NeMoStudio \
-            -destination 'generic/platform=iOS' -configuration Release \
-            -derivedDataPath "$RUNNER_TEMP/nemo-derived" \
-            -skipPackagePluginValidation -skipMacroValidation \
-            MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
-            CODE_SIGNING_ALLOWED=NO build \
-            2>&1 | tee "$RUNNER_TEMP/nemo-xcodebuild.log"
-          if grep -nE 'warning:' "$RUNNER_TEMP/nemo-xcodebuild.log"; then
-            echo '::error::La compilazione ha prodotto warning; correggerli prima di pubblicare.'
-            exit 1
-          fi
       - name: Remux H.264 and HEVC MP4 into MKV with AAC and selectable subtitles
         working-directory: iOS
         run: |
@@ -87,6 +59,34 @@ jobs:
           PY
             ffmpeg -v error -xerror -i "$target" -map 0:v:0 -map 0:a:0 -f null -
           done
+      - name: Resolve Swift packages and fix upstream Metal source
+        working-directory: iOS
+        run: |
+          set -o pipefail
+          xcodebuild -resolvePackageDependencies -project NeMoStudio.xcodeproj -scheme NeMoStudio \
+            -derivedDataPath "$RUNNER_TEMP/nemo-derived" \
+            2>&1 | tee "$RUNNER_TEMP/nemo-resolve.log"
+          python3 Scripts/patch_mlx_steel.py "$RUNNER_TEMP/nemo-derived"
+          if grep -nE 'warning:' "$RUNNER_TEMP/nemo-resolve.log"; then
+            echo '::error::La risoluzione dei pacchetti ha prodotto warning.'
+            exit 1
+          fi
+      - name: Compile for iPhone (unsigned)
+        working-directory: iOS
+        run: |
+          set -o pipefail
+          version="$(date -u +%G.%V.%u)"
+          xcodebuild -project NeMoStudio.xcodeproj -scheme NeMoStudio \
+            -destination 'generic/platform=iOS' -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/nemo-derived" \
+            -skipPackagePluginValidation -skipMacroValidation \
+            MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGNING_ALLOWED=NO build \
+            2>&1 | tee "$RUNNER_TEMP/nemo-xcodebuild.log"
+          if grep -nE 'warning:' "$RUNNER_TEMP/nemo-xcodebuild.log"; then
+            echo '::error::La compilazione ha prodotto warning; correggerli prima di pubblicare.'
+            exit 1
+          fi
       - name: Package and verify unsigned IPA
         run: |
           mkdir -p "$RUNNER_TEMP/nemo-ipa/Payload"
