@@ -2,6 +2,7 @@ import AVFoundation
 import AudioCommon
 import Foundation
 import MagpieTTS
+import MLX
 import NemotronStreamingASR
 import SpeechVAD
 
@@ -272,8 +273,10 @@ enum StudioPipeline {
         guard let speechLanguage = MagpieLanguage(code: String(language.prefix(2))) else {
             throw StudioPipelineError.unsupportedFormat
         }
+        Memory.cacheLimit = 64 * 1024 * 1024
+        Memory.clearCache()
         let model = try await MagpieTTS.fromPretrained(variant: .int8)
-        SessionLog.shared.write("Magpie dubbing model loaded lines=\(lines.count)")
+        SessionLog.shared.write("Magpie dubbing model loaded lines=\(lines.count) activeMiB=\(Memory.activeMemory / 1_048_576) cacheMiB=\(Memory.cacheMemory / 1_048_576)", always: true)
         let sampleRate = MagpieTTS.sampleRate
         guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                          sampleRate: Double(sampleRate), channels: 1,
@@ -322,14 +325,23 @@ enum StudioPipeline {
                 try emit(pending.count)
                 try silence(until: start)
             }
-            progress("Sintetizzo la voce: \(index + 1)/\(lines.count)")
             let voice = voices[max(0, min(3, line.speaker - 1))]
-            let samples = try model.synthesize(
-                text: line.text, speaker: voice, language: speechLanguage,
-                params: MagpieTTSParams(temperature: 0, topK: 1, maxSteps: 500))
-            if (index + 1) % 10 == 0 || index + 1 == lines.count {
-                SessionLog.shared.write("Magpie dubbed=\(index + 1)/\(lines.count) samples=\(samples.count)")
+            let parts = synthesisParts(line.text, maxCharacters: 36)
+            var samples: [Float] = []
+            for (partIndex, part) in parts.enumerated() {
+                try Task.checkCancellation()
+                progress("Sintetizzo la voce: \(index + 1)/\(lines.count) · parte \(partIndex + 1)/\(parts.count)")
+                SessionLog.shared.write("Magpie begin line=\(index + 1)/\(lines.count) part=\(partIndex + 1)/\(parts.count) characters=\(part.count) activeMiB=\(Memory.activeMemory / 1_048_576) cacheMiB=\(Memory.cacheMemory / 1_048_576) peakMiB=\(Memory.peakMemory / 1_048_576)", always: true)
+                let generated = try autoreleasepool {
+                    try model.synthesize(
+                        text: part, speaker: voice, language: speechLanguage,
+                        params: MagpieTTSParams(temperature: 0, topK: 1, maxSteps: 500))
+                }
+                samples.append(contentsOf: generated)
+                Memory.clearCache()
+                SessionLog.shared.write("Magpie end line=\(index + 1)/\(lines.count) part=\(partIndex + 1)/\(parts.count) samples=\(generated.count) activeMiB=\(Memory.activeMemory / 1_048_576) cacheMiB=\(Memory.cacheMemory / 1_048_576) peakMiB=\(Memory.peakMemory / 1_048_576)", always: true)
             }
+            progress("Voce sintetizzata: \(index + 1)/\(lines.count)")
             let offset = max(0, start - cursor)
             if offset + samples.count > pending.count {
                 pending.append(contentsOf: repeatElement(Float(0), count: offset + samples.count - pending.count))
@@ -345,6 +357,23 @@ enum StudioPipeline {
             try silence(until: max(cursor, Int((last.end * Double(sampleRate)).rounded())))
         }
         return url
+    }
+
+    private static func synthesisParts(_ text: String, maxCharacters: Int) -> [String] {
+        let words = text.split(whereSeparator: { $0.isWhitespace })
+        var parts: [String] = []
+        var current = ""
+        for word in words {
+            let token = String(word)
+            if !current.isEmpty && current.count + 1 + token.count > maxCharacters {
+                parts.append(current)
+                current = token
+            } else {
+                current = current.isEmpty ? token : current + " " + token
+            }
+        }
+        if !current.isEmpty { parts.append(current) }
+        return parts.isEmpty ? [text] : parts
     }
 
     private static func prepareAudio(_ url: URL) async throws -> URL {
