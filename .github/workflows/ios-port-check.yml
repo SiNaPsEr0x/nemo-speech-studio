@@ -1,14 +1,7 @@
 name: Build and publish NeMo Studio iOS
 
+# La build e la Release partono solo su richiesta esplicita da Actions.
 on:
-  push:
-    paths:
-      - 'iOS/**'
-      - '.github/workflows/ios-port-check.yml'
-  pull_request:
-    paths:
-      - 'iOS/**'
-      - '.github/workflows/ios-port-check.yml'
   workflow_dispatch:
 
 permissions:
