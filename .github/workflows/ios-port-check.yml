@@ -1,0 +1,34 @@
+name: iOS port check
+
+on:
+  push:
+    paths:
+      - 'iOS/**'
+      - '.github/workflows/ios-port-check.yml'
+  pull_request:
+    paths:
+      - 'iOS/**'
+      - '.github/workflows/ios-port-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Validate settings property list
+        run: plutil -lint iOS/NeMoStudio/Settings.bundle/Root.plist
+      - name: Generate Xcode project
+        working-directory: iOS
+        run: xcodegen generate
+      - name: Compile for iPhone (unsigned, no release)
+        working-directory: iOS
+        run: |
+          xcodebuild -project NeMoStudio.xcodeproj -scheme NeMoStudio \
+            -destination 'generic/platform=iOS' -configuration Release \
+            CODE_SIGNING_ALLOWED=NO build
