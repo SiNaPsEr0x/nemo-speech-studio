@@ -112,11 +112,11 @@ jobs:
           asset="$RUNNER_TEMP/NeMoStudio-iOS-${version}-build${{ github.run_number }}-unsigned.ipa"
           cp "$RUNNER_TEMP/NeMoStudio-unsigned.ipa" "$asset"
           cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
-          NeMo Studio per iOS: trascrizione locale Nemotron 3.5, identificazione parlanti Sortformer, traduzione Riva, sintesi Magpie, sottotitoli SRT/VTT/ASS, MKV con sottotitoli selezionabili per H.264/HEVC + AAC, MP4 impresso e MOV doppiato. Importazione da File e video dalla galleria Foto.
+          NeMo Studio per iOS: trascrizione Nemotron 3.5, parlanti Sortformer, traduzione Riva e voci Magpie sul dispositivo. In Studio scegli MP4 con sottotitoli originali e audio originale, MP4 con sottotitoli tradotti e audio originale, oppure MP4 doppiato nella lingua scelta con un'unica traccia audio e senza sottotitoli. I pulsanti File e Foto hanno le stesse dimensioni; nella tab Risultati i video sono mostrati prima dei file di testo.
 
-          L'IPA è senza firma: firmala con il tuo certificato prima di installarla su iPhone. Al primo avvio premi «Scarica / riprendi modelli»; i pesi non sono inclusi nell'IPA.
+          Sono disponibili anche SRT/VTT/ASS, MKV con sottotitoli selezionabili per video H.264/HEVC e audio AAC, MOV con audio originale e doppiato selezionabili e file WAV. Per tradurre scegli esplicitamente la lingua originale e una lingua diversa di destinazione.
 
-          I preset «Video + traccia» e «Tutto» sono attivi per video MP4/MOV con audio compatibile. «Tutto» esporta trascrizione, sottotitoli, MKV soft subtitle, MP4 con sottotitoli impressi, WAV doppiato e MOV con audio originale/doppiato; segnala un errore se manca un risultato richiesto. Compilazione e struttura IPA verificate in CI; inferenza dei modelli e riproduzione dei risultati richiedono una prova su iPhone reale. I container non decodificabili da AVFoundation non vengono elaborati. Per diagnosi attiva Debug nelle Impostazioni iOS e apri File → Sul mio iPhone → NeMo Studio → session.log.
+          L'IPA è senza firma: firmala con il tuo certificato prima di installarla. Al primo avvio scarica i modelli con «Scarica / riprendi»; i pesi non sono inclusi nell'IPA. Compilazione iOS, struttura IPA e remux MKV H.264/HEVC verificati in CI. L'inferenza dei modelli e la riproduzione dei risultati vanno provate su iPhone; per la diagnosi attiva Debug nelle Impostazioni iOS e apri File → Sul mio iPhone → NeMo Studio → session.log.
           NOTES
           if gh release view "$tag" > /dev/null 2>&1; then
             gh release view "$tag" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/old-assets.txt"
